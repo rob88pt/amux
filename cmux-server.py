@@ -1226,10 +1226,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Tags */
   .tag {
-    font-size: 0.68rem; padding: 2px 7px; border-radius: 4px;
+    font-size: 0.68rem; padding: 4px 8px; border-radius: 4px;
     font-weight: 500; background: rgba(88,166,255,0.12); color: var(--accent);
     border: 1px solid rgba(88,166,255,0.2); white-space: nowrap; flex-shrink: 0;
+    cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
+  .tag:active { background: rgba(88,166,255,0.25); }
 
   /* Tag filter bar */
   .tag-filters {
@@ -1462,17 +1464,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     margin-top: 6px;
   }
   .board-card-key { font-size: 0.62rem; color: var(--dim); font-family: "SF Mono","Fira Code",monospace; letter-spacing: 0.02em; white-space: nowrap; }
-  .board-card-session {
-    font-size: 0.62rem; background: rgba(88,166,255,0.08); color: var(--accent);
-    border: 1px solid rgba(88,166,255,0.18); border-radius: 4px; padding: 1px 5px; font-weight: 500;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 90px;
-  }
-  .board-card-tag {
-    font-size: 0.62rem; background: rgba(139,148,158,0.1); color: var(--dim);
-    border: 1px solid rgba(139,148,158,0.15); border-radius: 4px; padding: 1px 5px; white-space: nowrap;
+  .board-card-tag, .board-card-session {
+    font-size: 0.62rem; border-radius: 4px; padding: 3px 6px; white-space: nowrap;
     cursor: pointer; -webkit-tap-highlight-color: transparent;
   }
-  .board-card-tag:active { background: rgba(88,166,255,0.15); color: var(--accent); border-color: rgba(88,166,255,0.3); }
+  .board-card-tag { background: rgba(139,148,158,0.1); color: var(--dim); border: 1px solid rgba(139,148,158,0.15); }
+  .board-card-session {
+    background: rgba(88,166,255,0.08); color: var(--accent); font-weight: 500;
+    border: 1px solid rgba(88,166,255,0.18); overflow: hidden; text-overflow: ellipsis; max-width: 90px;
+  }
+  .board-card-tag:active, .board-card-session:active { background: rgba(88,166,255,0.15); color: var(--accent); border-color: rgba(88,166,255,0.3); }
   .board-card-time { font-size: 0.62rem; color: var(--dim); margin-left: auto; white-space: nowrap; }
   .board-add-btn {
     width: 100%; padding: 7px 0; font-size: 0.8rem; font-weight: 500;
@@ -2313,7 +2314,7 @@ function render() {
       ${(isYolo || model || s.tags.length) ? `<div class="badges">
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
         ${model ? `<span class="badge model">${esc(model)}</span>` : ''}
-        ${s.tags.map(t => `<span class="tag">${esc(t)}</span>`).join('')}
+        ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
       </div>` : ''}
       <div class="panel" onclick="event.stopPropagation()">
         ${isExp && s.task_name ? `<div class="card-task-name"><span class="tn-label">Task:</span>${esc(s.task_name)}</div>` : ''}
