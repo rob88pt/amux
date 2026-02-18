@@ -2195,7 +2195,7 @@ let _initialLoad = true;   // true until first data arrives from server
 let _lastDataTime = null;  // timestamp of last successful data
 let _debugLog = [];        // recent connection events (capped at 12)
 let _liveSSE = false;      // true only when SSE is actively receiving messages
-let expanded = null;
+let expanded = new Set();
 let searchQuery = '';
 let activeTag = '';
 let peekSession = null;
@@ -2671,7 +2671,7 @@ function render() {
     ? document.activeElement.id : null;
 
   function _renderSessionCard(s) {
-    const isExp = expanded === s.name;
+    const isExp = expanded.has(s.name);
     const flags = s.flags || '';
     const isYolo = flags.includes('--dangerously-skip-permissions');
     const modelMatch = flags.match(/--model\s+(\S+)/);
@@ -2874,10 +2874,10 @@ function fmtDuration(sec) {
 
 function toggle(name) {
   if (_tileJustDragged) { _tileJustDragged = false; return; }
-  expanded = expanded === name ? null : name;
+  if (expanded.has(name)) { expanded.delete(name); } else { expanded.add(name); }
   closeAllMenus();
   render();
-  if (expanded) {
+  if (expanded.has(name)) {
     fetchStats(name);
   }
 }
@@ -3242,7 +3242,7 @@ async function deleteSession(session) {
   closeAllMenus();
   if (!confirm('Delete session "' + session + '"?')) return;
   await apiCall(API + '/api/sessions/' + session + '/delete', { method: 'POST' });
-  if (expanded === session) expanded = null;
+  expanded.delete(session);
   await fetchSessions();
 }
 
