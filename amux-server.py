@@ -19,6 +19,10 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+# Strip Claude Code env vars so child processes (new sessions) don't inherit them
+for _cv in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"):
+    os.environ.pop(_cv, None)
+
 # Support both ~/.amux (new) and legacy dirs for migration
 _amux_home = Path.home() / ".amux"
 for _old_home in [Path.home() / ".cmux", Path.home() / ".cc"]:
@@ -723,16 +727,24 @@ def get_session_info(name: str) -> dict | None:
 
 
 def _find_latest_session_id(work_dir: str) -> str:
-    """Find the most recent Claude Code session ID for a working directory."""
+    """Find the most recent Claude Code conversation session ID for a working directory.
+    Skips snapshot-only files that have no user/assistant messages (claude --resume exits on those)."""
     resolved = str(Path(work_dir).expanduser().resolve())
     project_name = resolved.replace("/", "-")
     project_dir = CLAUDE_HOME / "projects" / project_name
     if not project_dir.is_dir():
         return ""
     jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
-    if not jsonl_files:
-        return ""
-    return jsonl_files[0].stem  # filename without .jsonl = session UUID
+    for f in jsonl_files:
+        try:
+            text = f.read_text(errors="replace")
+            for line in text.splitlines():
+                entry = json.loads(line)
+                if entry.get("type") in ("user", "assistant"):
+                    return f.stem
+        except Exception:
+            continue
+    return ""
 
 
 def _ensure_memory(name: str, work_dir: str):
@@ -798,13 +810,13 @@ def start_session(name: str, extra_flags: str = "") -> tuple[bool, str]:
         # Clear CLAUDECODE so nested-session detection doesn't block Claude
         # Source user profile to ensure PATH includes ~/.local/bin (where claude lives)
         # Then cd back to work_dir since the profile may override CWD (e.g. cd ~/Dev)
-        shell_rc = ""
+        shell_rc = "unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; "
         for rc in [Path.home() / ".zprofile", Path.home() / ".bash_profile", Path.home() / ".profile"]:
             if rc.exists():
-                shell_rc = f"source {rc} 2>/dev/null; cd {shlex.quote(work_dir)}; "
+                shell_rc += f"source {rc} 2>/dev/null; cd {shlex.quote(work_dir)}; "
                 break
-        if not shell_rc:
-            shell_rc = f"cd {shlex.quote(work_dir)}; "
+        else:
+            shell_rc += f"cd {shlex.quote(work_dir)}; "
         subprocess.run(
             ["tmux", "new-session", "-d", "-s", tmux_sess, "-n", name, "-c", work_dir,
              "-e", "TMUX_SESSION_NAME=" + name, shell_rc + cmd],
