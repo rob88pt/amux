@@ -2189,6 +2189,7 @@ let sessions = [];
 let _initialLoad = true;   // true until first data arrives from server
 let _lastDataTime = null;  // timestamp of last successful data
 let _debugLog = [];        // recent connection events (capped at 12)
+let _liveSSE = false;      // true only when SSE is actively receiving messages
 let expanded = null;
 let searchQuery = '';
 let activeTag = '';
@@ -4967,7 +4968,6 @@ updateConnectionStatus();
 let _sse = null;
 let _sseRetries = 0;
 let _sseFallback = false;
-let _liveSSE = false;  // true only when SSE is actually receiving messages
 let _pollTimer = null;
 
 function connectSSE() {
