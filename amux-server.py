@@ -1518,6 +1518,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     color: #4ade80; background: rgba(74,222,128,0.1);
   }
   .conn-status.online::before { background: #4ade80; }
+  .conn-status.polling {
+    color: #facc15; background: rgba(250,204,21,0.1);
+  }
+  .conn-status.polling::before { background: #facc15; }
   .conn-status.offline {
     color: #f87171; background: rgba(248,113,113,0.15);
   }
@@ -2302,13 +2306,16 @@ function describeOp(item) {
 function updateConnectionStatus() {
   // Update all connection status indicators (main + peek)
   document.querySelectorAll('#conn-status, #peek-conn-status').forEach(el => {
-    if (online) {
-      el.className = 'conn-status online';
-      el.textContent = 'Live';
-    } else {
+    if (!online) {
       el.className = 'conn-status offline';
       const total = offlineQueue.length + drafts.length;
       el.textContent = total ? total + ' pending' : 'Offline';
+    } else if (_liveSSE) {
+      el.className = 'conn-status online';
+      el.textContent = 'Live';
+    } else {
+      el.className = 'conn-status polling';
+      el.textContent = 'Polling';
     }
   });
   // Update offline banner
@@ -2348,12 +2355,14 @@ function setOnline(val) {
   const was = online;
   online = val;
   if (val) consecutiveFailures = 0;
+  if (!val) _liveSSE = false;
   updateConnectionStatus();
   if (!was && val) {
     showToast('Reconnected — syncing...');
     runSyncBanner();
-    // Reconnect SSE if not in fallback mode
-    if (!_sseFallback && !_sse) { _sseRetries = 0; connectSSE(); }
+    // Reconnect SSE (reset fallback so we can get back to Live mode)
+    _sseFallback = false; _sseRetries = 0;
+    if (!_sse) connectSSE();
   } else if (was && !val) {
     showToast('Server unreachable — offline mode');
   }
@@ -4932,6 +4941,7 @@ updateConnectionStatus();
 let _sse = null;
 let _sseRetries = 0;
 let _sseFallback = false;
+let _liveSSE = false;  // true only when SSE is actually receiving messages
 let _pollTimer = null;
 
 function connectSSE() {
@@ -4940,6 +4950,7 @@ function connectSSE() {
 
   _sse.onmessage = function(e) {
     _sseRetries = 0;
+    if (!_liveSSE) { _liveSSE = true; updateConnectionStatus(); }
     if (!online) setOnline(true);
     try {
       const msg = JSON.parse(e.data);
@@ -4965,8 +4976,10 @@ function connectSSE() {
 
   _sse.onerror = function() {
     _sseRetries++;
+    _liveSSE = false;
     _sse.close();
     _sse = null;
+    updateConnectionStatus();
     if (_sseRetries >= 3) {
       enablePollingFallback();
     } else {
