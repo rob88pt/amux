@@ -1399,6 +1399,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-cmd-row.open { display: flex; }
   .peek-cmd-row .send-input { font-size: 0.85rem; padding: 8px 12px; min-height: 36px; }
   .peek-cmd-row .btn { min-height: 36px; padding: 6px 12px; font-size: 0.82rem; }
+  /* Peek tabs & memory panel */
+  .peek-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; padding: 0 12px; }
+  .peek-tab { padding: 8px 14px; font-size: 0.82rem; background: none; border: none;
+    border-bottom: 2px solid transparent; color: var(--dim); cursor: pointer;
+    margin-bottom: -1px; -webkit-tap-highlight-color: transparent; }
+  .peek-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .peek-tab:hover { color: var(--text); }
+  .peek-dir-bar { display: flex; align-items: center; gap: 8px; padding: 6px 14px;
+    font-size: 0.75rem; color: var(--dim); border-bottom: 1px solid var(--border);
+    flex-shrink: 0; min-width: 0; overflow: hidden; }
+  .peek-dir-bar span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; font-family: "SF Mono","Fira Code",monospace; }
+  .peek-terminal-panel { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .peek-memory-editor { display: none; flex-direction: column; flex: 1; min-height: 0;
+    padding: 14px 16px; gap: 10px; overflow: hidden; }
+  .peek-memory-editor.active { display: flex; }
+  .peek-memory-textarea { flex: 1; width: 100%; font-size: 0.88rem; line-height: 1.65;
+    font-family: "SF Mono","Fira Code",monospace; background: var(--bg);
+    border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+    padding: 10px 12px; resize: none; outline: none; box-sizing: border-box; min-height: 0; }
+  .peek-memory-textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12); }
 
   /* Card stats */
   .card-stats {
@@ -2077,34 +2097,56 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="btn" onclick="closePeek()">Close</button>
     </div>
   </div>
-  <div style="position:relative;flex:1;min-height:0;">
-    <div id="peek-body" class="overlay-body" style="position:absolute;inset:0;"></div>
-    <button class="peek-copy-btn" id="peek-copy-btn" onclick="copyPeekContent()" title="Copy all">&#x2398; Copy</button>
+  <!-- Tab bar -->
+  <div class="peek-tabs">
+    <button class="peek-tab active" id="peek-tab-terminal" onclick="setPeekTab('terminal')">Terminal</button>
+    <button class="peek-tab" id="peek-tab-memory" onclick="setPeekTab('memory')">Memory</button>
   </div>
-  <div id="peek-status" class="overlay-status"></div>
-  <div class="peek-cmd-bar">
-    <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25B2; Send command</button>
-    <div class="peek-cmd-row" id="peek-cmd-row" style="flex-wrap:wrap;">
-      <div class="chips" style="width:100%;margin:0;">
-        <div class="chip" onclick="peekQuickSend('/compact')">/compact</div>
-        <div class="chip" onclick="peekQuickSend('/status')">/status</div>
-        <div class="chip" onclick="peekQuickSend('/clear')">/clear</div>
-        <div class="chip" onclick="peekQuickSend('/cost')">/cost</div>
-        <div class="chip" onclick="peekQuickKeys('C-c')">Ctrl-C</div>
-        <div class="chip" onclick="peekQuickKeys('Escape')">Esc</div>
-        <div class="chip" onclick="peekQuickKeys('Enter')">Enter</div>
-        <div class="chip" onclick="peekQuickKeys('Up')">&#x2191;</div>
-        <div class="chip" onclick="peekQuickKeys('Down')">&#x2193;</div>
-      </div>
-      <div class="ac-wrap" style="flex:1;">
-        <textarea class="send-input" id="peek-cmd-input" rows="1" placeholder="Type a command..."
-          autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"
-          enterkeyhint="enter" style="width:100%;"
-          oninput="autoGrow(this);slashAcUpdate()" onkeydown="slashAcKeydown(event)"></textarea>
-        <div id="slash-ac-list" class="ac-list slash-ac"></div>
-      </div>
-      <button class="btn primary" onclick="sendPeekCmd()">Send</button>
+  <!-- Working directory bar -->
+  <div class="peek-dir-bar">
+    <span style="flex-shrink:0;opacity:0.6;">&#x1F4C1;</span>
+    <span id="peek-dir-text"></span>
+  </div>
+  <!-- Terminal panel -->
+  <div id="peek-terminal-panel" class="peek-terminal-panel">
+    <div style="position:relative;flex:1;min-height:0;">
+      <div id="peek-body" class="overlay-body" style="position:absolute;inset:0;"></div>
+      <button class="peek-copy-btn" id="peek-copy-btn" onclick="copyPeekContent()" title="Copy all">&#x2398; Copy</button>
     </div>
+    <div id="peek-status" class="overlay-status"></div>
+    <div class="peek-cmd-bar">
+      <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25B2; Send command</button>
+      <div class="peek-cmd-row" id="peek-cmd-row" style="flex-wrap:wrap;">
+        <div class="chips" style="width:100%;margin:0;">
+          <div class="chip" onclick="peekQuickSend('/compact')">/compact</div>
+          <div class="chip" onclick="peekQuickSend('/status')">/status</div>
+          <div class="chip" onclick="peekQuickSend('/clear')">/clear</div>
+          <div class="chip" onclick="peekQuickSend('/cost')">/cost</div>
+          <div class="chip" onclick="peekQuickKeys('C-c')">Ctrl-C</div>
+          <div class="chip" onclick="peekQuickKeys('Escape')">Esc</div>
+          <div class="chip" onclick="peekQuickKeys('Enter')">Enter</div>
+          <div class="chip" onclick="peekQuickKeys('Up')">&#x2191;</div>
+          <div class="chip" onclick="peekQuickKeys('Down')">&#x2193;</div>
+        </div>
+        <div class="ac-wrap" style="flex:1;">
+          <textarea class="send-input" id="peek-cmd-input" rows="1" placeholder="Type a command..."
+            autocomplete="off" autocorrect="on" autocapitalize="sentences" spellcheck="true"
+            enterkeyhint="enter" style="width:100%;"
+            oninput="autoGrow(this);slashAcUpdate()" onkeydown="slashAcKeydown(event)"></textarea>
+          <div id="slash-ac-list" class="ac-list slash-ac"></div>
+        </div>
+        <button class="btn primary" onclick="sendPeekCmd()">Send</button>
+      </div>
+    </div>
+  </div>
+  <!-- Memory editor panel -->
+  <div id="peek-memory-panel" class="peek-memory-editor">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
+      <div style="font-size:0.78rem;color:var(--dim);">Shown to Claude every time this session resumes</div>
+      <button class="btn primary" id="peek-memory-save" onclick="savePeekMemory()">Save</button>
+    </div>
+    <textarea id="peek-memory-input" class="peek-memory-textarea"
+      placeholder="No memory yet. Add notes, context, or conventions that Claude should always remember for this session..."></textarea>
   </div>
 </div>
 
@@ -2543,9 +2585,21 @@ function clearQueue() {
 }
 async function forceRetry() {
   closeQueueModal();
-  if (!offlineQueue.length) return;
-  setOnline(true);
+  if (!offlineQueue.length && !drafts.length) return;
+  if (online) { runSyncBanner(); } else { setOnline(true); }
 }
+
+// Auto-retry queued ops when page becomes visible (returning from background on mobile)
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    if ((offlineQueue.length || drafts.length) && online) {
+      runSyncBanner();
+    } else if (!online && navigator.onLine !== false) {
+      consecutiveFailures = 0;
+      setOnline(true);
+    }
+  }
+});
 
 // apiCall — wraps mutation fetches; queues when offline or server unreachable
 async function apiCall(url, options) {
@@ -3364,10 +3418,55 @@ async function sendFromInput(name) {
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
 }
 
+let _peekTab = 'terminal';
+function setPeekTab(tab) {
+  _peekTab = tab;
+  document.getElementById('peek-tab-terminal').classList.toggle('active', tab === 'terminal');
+  document.getElementById('peek-tab-memory').classList.toggle('active', tab === 'memory');
+  document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
+  const mem = document.getElementById('peek-memory-panel');
+  if (tab === 'memory') { mem.classList.add('active'); loadPeekMemory(); }
+  else { mem.classList.remove('active'); }
+}
+async function loadPeekMemory() {
+  const inp = document.getElementById('peek-memory-input');
+  const save = document.getElementById('peek-memory-save');
+  inp.value = 'Loading...'; inp.disabled = true; save.disabled = true;
+  try {
+    const r = await fetch(API + '/api/sessions/' + peekSession + '/memory');
+    const data = await r.json();
+    inp.value = data.content || '';
+  } catch(e) { inp.value = ''; }
+  inp.disabled = false; save.disabled = false;
+  inp.focus();
+}
+async function savePeekMemory() {
+  const inp = document.getElementById('peek-memory-input');
+  const save = document.getElementById('peek-memory-save');
+  save.disabled = true; save.textContent = 'Saving...';
+  try {
+    await fetch(API + '/api/sessions/' + peekSession + '/memory', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ content: inp.value })
+    });
+    save.textContent = 'Saved!';
+    setTimeout(() => { save.disabled = false; save.textContent = 'Save'; }, 1500);
+  } catch(e) {
+    save.disabled = false; save.textContent = 'Save';
+    showToast('Failed to save memory');
+  }
+}
+
 function openPeek(name) {
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
   peekSession = name;
   peekSessionDir = (sessions.find(s => s.name === name) || {}).dir || '';
+  // Reset to terminal tab
+  if (_peekTab !== 'terminal') setPeekTab('terminal');
+  document.getElementById('peek-terminal-panel').style.display = '';
+  document.getElementById('peek-memory-panel').classList.remove('active');
+  // Update dir bar
+  document.getElementById('peek-dir-text').textContent = peekSessionDir || '(unknown)';
   peekSearchQuery = '';
   lastPeekHTML = '';
   const searchInp = document.getElementById('peek-search');
@@ -5115,6 +5214,14 @@ _idb.get('offline_queue').then(val => {
   if ((offlineQueue.length || (val && val.length)) && 'serviceWorker' in navigator && 'SyncManager' in window) {
     navigator.serviceWorker.ready.then(r => r.sync.register('replay-queue').catch(() => {}));
   }
+  // Auto-retry queued ops on startup if online (fallback when BackgroundSync isn't available)
+  if (offlineQueue.length || (val && val.length)) {
+    setTimeout(() => {
+      if (online && navigator.onLine !== false && (offlineQueue.length || drafts.length)) {
+        runSyncBanner();
+      }
+    }, 4000);
+  }
 });
 
 function fmtTokens(n) {
@@ -6086,6 +6193,10 @@ class CCHandler(BaseHTTPRequestHandler):
                 cfg = parse_env_file(env_file)
                 stats = get_claude_stats(cfg.get("CC_DIR", ""))
                 return self._json(stats)
+            if action == "memory":
+                mem_file = CC_MEMORY / f"{name}.md"
+                content = mem_file.read_text(errors="replace") if mem_file.exists() else ""
+                return self._json({"content": content, "path": str(mem_file)})
             return self._json({"error": "not found"}, 404)
 
         if method == "POST":
@@ -6103,6 +6214,12 @@ class CCHandler(BaseHTTPRequestHandler):
                     return self._json({"error": "missing 'keys'"}, 400)
                 ok, msg = send_keys(name, keys)
                 return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+            if action == "memory":
+                body = self._read_body()
+                content = body.get("content", "")
+                mem_file = CC_MEMORY / f"{name}.md"
+                mem_file.write_text(content)
+                return self._json({"ok": True})
             if action == "start":
                 cfg = parse_env_file(CC_SESSIONS / f"{name}.env") if (CC_SESSIONS / f"{name}.env").exists() else {}
                 work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
