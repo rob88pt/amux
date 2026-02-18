@@ -31,6 +31,13 @@ CC_LOGS.mkdir(parents=True, exist_ok=True)
 CLAUDE_HOME = Path.home() / ".claude"
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10MB per session
 
+# SSE shared cache — avoids redundant subprocess calls when multiple tabs connect
+_sse_cache = {
+    "sessions": {"data": None, "json": "", "time": 0},
+    "board": {"data": None, "json": "", "time": 0},
+}
+_SSE_CACHE_TTL = 2  # seconds
+
 # ═══════════════════════════════════════════
 # SESSION FILE HELPERS
 # ═══════════════════════════════════════════
@@ -1877,7 +1884,7 @@ window.addEventListener('online', () => { consecutiveFailures = 0; setOnline(tru
 });
 let offlineQueue = JSON.parse(localStorage.getItem('cmux_offline_queue') || '[]');
 function saveQueue() {
-  saveQueue();
+  localStorage.setItem('cmux_offline_queue', JSON.stringify(offlineQueue));
   if (typeof _idb !== 'undefined') _idb.set('offline_queue', offlineQueue);
 }
 
@@ -2001,6 +2008,8 @@ function setOnline(val) {
   if (!was && val) {
     showToast('Reconnected — syncing...');
     runSyncBanner();
+    // Reconnect SSE if not in fallback mode
+    if (!_sseFallback && !_sse) { _sseRetries = 0; connectSSE(); }
   } else if (was && !val) {
     showToast('Server unreachable — offline mode');
   }
@@ -2153,6 +2162,10 @@ async function apiCall(url, options) {
 function _queueOp(url, options) {
   offlineQueue.push({ url, options: { method: options.method, headers: options.headers, body: options.body }, timestamp: Date.now() });
   saveQueue();
+  // Register Background Sync so SW can replay queue when connectivity returns
+  if ('serviceWorker' in navigator && 'SyncManager' in window) {
+    navigator.serviceWorker.ready.then(r => r.sync.register('replay-queue').catch(() => {}));
+  }
   updateConnectionStatus();
   showToast('Queued (' + offlineQueue.length + ' pending)');
 }
@@ -3586,7 +3599,8 @@ function switchView(view) {
   if (view === 'board') {
     renderBoard();
     fetchBoard();
-    if (!boardTimer) boardTimer = setInterval(fetchBoard, 5000);
+    // Only poll if SSE is not active (SSE pushes board updates)
+    if (_sseFallback && !boardTimer) boardTimer = setInterval(fetchBoard, 5000);
   } else {
     if (boardTimer) { clearInterval(boardTimer); boardTimer = null; }
   }
@@ -4113,8 +4127,63 @@ if (_cachedBoard) {
 }
 if (sessions.length || drafts.length) render();
 updateConnectionStatus();
-fetchSessions();
-setInterval(fetchSessions, 5000);
+
+// ═══════ SSE — real-time push updates ═══════
+let _sse = null;
+let _sseRetries = 0;
+let _sseFallback = false;
+let _pollTimer = null;
+
+function connectSSE() {
+  if (_sseFallback || _sse) return;
+  _sse = new EventSource(API + '/api/events');
+
+  _sse.onmessage = function(e) {
+    _sseRetries = 0;
+    if (!online) setOnline(true);
+    try {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'sessions') {
+        const j = JSON.stringify(msg.payload);
+        if (j !== lastSessionsJSON) {
+          lastSessionsJSON = j;
+          sessions = msg.payload;
+          localStorage.setItem('cmux_sessions_cache', j);
+          render();
+        }
+      } else if (msg.type === 'board') {
+        const j = JSON.stringify(msg.payload);
+        if (j !== lastBoardJSON) {
+          lastBoardJSON = j;
+          boardItems = msg.payload;
+          localStorage.setItem('cmux_board_cache', j);
+          if (activeView === 'board') renderBoard();
+        }
+      }
+    } catch(err) { console.error('SSE parse:', err); }
+  };
+
+  _sse.onerror = function() {
+    _sseRetries++;
+    _sse.close();
+    _sse = null;
+    if (_sseRetries >= 3) {
+      enablePollingFallback();
+    } else {
+      setTimeout(connectSSE, 2000 * _sseRetries);
+    }
+  };
+}
+
+function enablePollingFallback() {
+  _sseFallback = true;
+  if (_sse) { _sse.close(); _sse = null; }
+  fetchSessions();
+  if (!_pollTimer) _pollTimer = setInterval(fetchSessions, 5000);
+}
+
+// Start SSE (falls back to polling on failure)
+connectSSE();
 
 // Register service worker for offline asset caching
 if ('serviceWorker' in navigator) {
@@ -4127,6 +4196,23 @@ if ('serviceWorker' in navigator) {
         if (reg.active) reg.active.postMessage({ type: 'CACHE_HTML', html });
       }).catch(() => {});
     }
+    // Listen for Background Sync completion messages from SW
+    navigator.serviceWorker.addEventListener('message', function(e) {
+      if (e.data && e.data.type === 'SYNC_COMPLETE') {
+        const { replayed, remaining } = e.data;
+        if (replayed > 0) showToast('Synced ' + replayed + ' queued op' + (replayed > 1 ? 's' : ''));
+        // Reload queue from IDB
+        _idb.get('offline_queue').then(val => {
+          offlineQueue = val || [];
+          saveQueue();
+          updateConnectionStatus();
+        });
+        // Refresh data and reconnect SSE
+        fetchSessions();
+        fetchBoard();
+        if (!_sseFallback && !_sse) { _sseRetries = 0; connectSSE(); }
+      }
+    });
   }).catch(() => {});
 }
 
@@ -4178,6 +4264,10 @@ _idb.get('offline_queue').then(val => {
     offlineQueue = val;
     saveQueue();
     updateConnectionStatus();
+  }
+  // On startup, register Background Sync if queue is non-empty
+  if ((offlineQueue.length || (val && val.length)) && 'serviceWorker' in navigator && 'SyncManager' in window) {
+    navigator.serviceWorker.ready.then(r => r.sync.register('replay-queue').catch(() => {}));
   }
 });
 
@@ -4272,7 +4362,7 @@ PWA_MANIFEST = json.dumps({
 
 # Robust service worker: cache-first with localStorage fallback for multi-day offline
 SERVICE_WORKER = r"""
-const CACHE = 'cmux-v0.5.0';
+const CACHE = 'cmux-v0.6.0';
 const SHELL_URLS = ['/', '/manifest.json', '/icon-192.png', '/icon-512.png'];
 
 // Install: pre-cache entire app shell
@@ -4330,6 +4420,57 @@ self.addEventListener('fetch', e => {
       })
     )
   );
+});
+
+// Background Sync — replay offline queue when connectivity returns
+self.addEventListener('sync', e => {
+  if (e.tag !== 'replay-queue') return;
+  e.waitUntil((async () => {
+    // Open IndexedDB directly (SW can't access localStorage)
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open('cmux', 1);
+      req.onupgradeneeded = () => {
+        const d = req.result;
+        if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    const tx = db.transaction('kv', 'readonly');
+    const queue = await new Promise((resolve, reject) => {
+      const r = tx.objectStore('kv').get('offline_queue');
+      r.onsuccess = () => resolve(r.result || []);
+      r.onerror = () => reject(r.error);
+    });
+    if (!queue.length) return;
+
+    const failures = [];
+    let replayed = 0;
+    for (const item of queue) {
+      try {
+        const r = await fetch(item.url, item.options);
+        if (r.status >= 500) {
+          failures.push(item);  // retry later
+        } else {
+          replayed++;  // 2xx/3xx/4xx — done (4xx = stale, drop)
+        }
+      } catch(e) {
+        failures.push(item);  // network error — retry later
+      }
+    }
+
+    // Write remaining failures back to IDB
+    const tx2 = db.transaction('kv', 'readwrite');
+    tx2.objectStore('kv').put(failures, 'offline_queue');
+    await new Promise((resolve, reject) => {
+      tx2.oncomplete = resolve;
+      tx2.onerror = () => reject(tx2.error);
+    });
+
+    // Notify all clients
+    const clients = await self.clients.matchAll();
+    clients.forEach(c => c.postMessage({ type: 'SYNC_COMPLETE', replayed, remaining: failures.length }));
+  })());
 });
 """.strip()
 
@@ -4412,6 +4553,59 @@ class CCHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _sse_events(self):
+        """Server-Sent Events stream for real-time session and board updates."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        last_sessions_json = ""
+        last_board_json = ""
+        heartbeat_counter = 0
+
+        try:
+            while True:
+                now = time.time()
+
+                # Sessions — use shared cache to avoid redundant subprocess calls
+                sc = _sse_cache["sessions"]
+                if now - sc["time"] > _SSE_CACHE_TTL:
+                    data = list_sessions()
+                    sc["data"] = data
+                    sc["json"] = json.dumps(data, sort_keys=True)
+                    sc["time"] = now
+                if sc["json"] != last_sessions_json:
+                    last_sessions_json = sc["json"]
+                    self.wfile.write(f"data: {json.dumps({'type': 'sessions', 'payload': sc['data']})}\n\n".encode())
+                    self.wfile.flush()
+
+                # Board — use shared cache
+                bc = _sse_cache["board"]
+                if now - bc["time"] > _SSE_CACHE_TTL:
+                    data = _load_board()
+                    bc["data"] = data
+                    bc["json"] = json.dumps(data, sort_keys=True)
+                    bc["time"] = now
+                if bc["json"] != last_board_json:
+                    last_board_json = bc["json"]
+                    self.wfile.write(f"data: {json.dumps({'type': 'board', 'payload': bc['data']})}\n\n".encode())
+                    self.wfile.flush()
+
+                # Heartbeat every 15s (7-8 iterations at 2s sleep)
+                heartbeat_counter += 1
+                if heartbeat_counter >= 8:
+                    self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+                    heartbeat_counter = 0
+
+                time.sleep(2)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
     def _read_body(self) -> dict:
         length = int(self.headers.get("Content-Length", 0))
         if length == 0:
@@ -4437,6 +4631,10 @@ class CCHandler(BaseHTTPRequestHandler):
             if size not in _icon_cache:
                 _icon_cache[size] = _generate_icon_png(size)
             return self._raw(_icon_cache[size], "image/png", cache=True)
+
+        # GET /api/events (SSE stream)
+        if method == "GET" and path == "/api/events":
+            return self._sse_events()
 
         # GET /api/sessions
         if method == "GET" and path == "/api/sessions":
