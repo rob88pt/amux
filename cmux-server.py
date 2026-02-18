@@ -1355,7 +1355,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Tag filter bar */
   .tag-filters {
-    display: flex; gap: 6px; flex-wrap: nowrap; margin-bottom: 10px;
+    display: flex; gap: 6px; flex-wrap: nowrap; margin-top: 8px; margin-bottom: 10px;
     overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
   }
   .tag-filters::-webkit-scrollbar { display: none; }
