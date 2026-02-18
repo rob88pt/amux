@@ -2084,6 +2084,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="explore-overlay" class="file-overlay" style="z-index:250;">
   <div class="file-overlay-header">
     <div class="explore-breadcrumb" id="explore-breadcrumb" style="flex:1;margin-right:8px;"></div>
+    <button class="btn" id="explore-hidden-btn" onclick="toggleExploreHidden()" style="font-size:0.7rem;padding:2px 8px;" title="Show hidden files">.*</button>
     <button class="btn" onclick="closeExplore()">Close</button>
   </div>
   <div id="explore-body" class="file-overlay-body" style="padding:0;overflow-y:auto;"></div>
@@ -3620,6 +3621,7 @@ function closeFilePreview() {
 
 // ═══════ FILE EXPLORER ═══════
 let _explorePath = '';
+let _exploreShowHidden = false;
 function openExplore(startPath) {
   _explorePath = startPath || '/';
   document.getElementById('explore-overlay').classList.add('active');
@@ -3629,6 +3631,13 @@ function openExplore(startPath) {
 function closeExplore() {
   document.getElementById('explore-overlay').classList.remove('active');
   document.body.style.overflow = '';
+}
+function toggleExploreHidden() {
+  _exploreShowHidden = !_exploreShowHidden;
+  const btn = document.getElementById('explore-hidden-btn');
+  btn.style.background = _exploreShowHidden ? 'var(--accent)' : '';
+  btn.style.color = _exploreShowHidden ? '#000' : '';
+  loadExplore(_explorePath);
 }
 function _fmtSize(bytes) {
   if (bytes == null) return '';
@@ -3651,7 +3660,7 @@ async function loadExplore(path) {
   }
   document.getElementById('explore-breadcrumb').innerHTML = crumbHtml;
   try {
-    const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(path));
+    const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(path) + (_exploreShowHidden ? '&hidden=1' : ''));
     const data = await r.json();
     if (data.error) { body.innerHTML = `<div style="padding:16px;color:var(--dim)">${esc(data.error)}</div>`; return; }
     body.innerHTML = '';
@@ -5364,18 +5373,19 @@ class CCHandler(BaseHTTPRequestHandler):
             except PermissionError:
                 return self._json([])
 
-        # GET /api/ls?path=...
+        # GET /api/ls?path=...&hidden=0|1
         if method == "GET" and path == "/api/ls":
             ls_path = qs.get("path", [""])[0]
             if not ls_path:
                 return self._json({"error": "missing path"}, 400)
+            show_hidden = qs.get("hidden", ["0"])[0] == "1"
             p = Path(ls_path).expanduser().resolve()
             if not p.is_dir():
                 return self._json({"error": "not a directory"}, 400)
             try:
                 entries = []
                 for item in sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-                    if item.name.startswith('.'):
+                    if not show_hidden and item.name.startswith('.'):
                         continue
                     try:
                         st = item.stat()
