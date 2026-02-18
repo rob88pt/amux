@@ -912,6 +912,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Session cards */
   .cards { display: grid; grid-template-columns: 1fr; gap: 10px; }
   @media (min-width: 768px) { .cards { grid-template-columns: 1fr 1fr; } }
+
+  /* Tile mode (desktop only) */
+  .tile-controls { display: none; }
+  @media (min-width: 900px) { .tile-controls { display: flex; gap: 4px; align-items: center; } }
+  .tile-btn { width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border); background: transparent; color: var(--dim); cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; justify-content: center; }
+  .tile-btn:hover { border-color: var(--accent); color: var(--text); }
+  .tile-btn.active { background: var(--accent); color: #000; border-color: var(--accent); }
+  .cards.tile-mode { display: block; position: relative; min-height: 80vh; }
+  .cards.tile-mode .card { position: absolute; width: 340px; }
+  .cards.tile-mode .card-header { cursor: grab; }
+  .tile-dragging { box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important; z-index: 10 !important; cursor: grabbing !important; }
+  .tile-dragging .card-header { cursor: grabbing !important; }
+
   .card {
     background: var(--card); border: 1px solid var(--border);
     border-radius: 10px; padding: 14px 16px; cursor: pointer;
@@ -1828,11 +1841,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-board" onclick="switchView('board')">Board</button>
 </div>
 <div id="session-view">
-<div style="padding:0 12px;margin-top:4px;">
-  <div class="search-wrap" id="search-wrap">
+<div style="padding:0 12px;margin-top:4px;display:flex;align-items:center;gap:8px;">
+  <div class="search-wrap" id="search-wrap" style="flex:1;">
     <input class="search-input" id="search-input" type="text" placeholder="Search sessions..." autocomplete="off" autocorrect="off"
       oninput="searchQuery=this.value;document.getElementById('search-wrap').classList.toggle('has-value',!!this.value);render()">
     <button class="search-clear" onclick="event.stopPropagation();clearSearch()">&#x2715;</button>
+  </div>
+  <div class="tile-controls">
+    <button class="tile-btn active" id="tile-grid-btn" onclick="setTileMode('grid')" title="Grid layout">&#x25A4;</button>
+    <button class="tile-btn" id="tile-free-btn" onclick="setTileMode('tiles')" title="Free tiles">&#x2B1A;</button>
+    <button class="tile-btn" id="tile-arrange-btn" onclick="autoArrangeTiles()" title="Auto-arrange" style="display:none;">&#x2725;</button>
   </div>
 </div>
 <div id="tag-filters" class="tag-filters"></div>
@@ -2567,8 +2585,8 @@ function render() {
     const model = flagModel || s.active_model || null;
     const shortModel = model ? model.replace(/^claude-/, '').replace(/-\d{8}$/, '') : null;
     return `
-    <div class="card ${isExp ? 'expanded' : ''}" onclick="toggle('${s.name}')">
-      <div class="card-header" onclick="headerTap('${s.name}', event)">
+    <div class="card ${isExp ? 'expanded' : ''}" data-session="${esc(s.name)}" onclick="toggle('${s.name}')">
+      <div class="card-header" onclick="headerTap('${s.name}', event)" onmousedown="tileMouseDown(event,'${s.name}')">
         <div class="dot ${s.running ? 'running' : 'stopped'}"></div>
         <div class="card-name">${s.pinned ? '<span class="pin-icon">&#x1F4CC;</span> ' : ''}${esc(s.name)}</div>
         ${s.status === 'active' ? '<span class="status-badge active">working</span>' : ''}
@@ -2652,6 +2670,11 @@ function render() {
     const inp = document.getElementById(focusedId);
     if (inp) inp.focus({ preventScroll: true });
   }
+
+  // Apply tile positions after render
+  if (tileMode === 'tiles' && window.innerWidth >= 900) {
+    requestAnimationFrame(applyTilePositions);
+  }
 }
 
 function esc(s) {
@@ -2678,6 +2701,7 @@ function fmtDuration(sec) {
 }
 
 function toggle(name) {
+  if (_tileJustDragged) { _tileJustDragged = false; return; }
   expanded = expanded === name ? null : name;
   closeAllMenus();
   render();
@@ -3944,6 +3968,129 @@ document.addEventListener('keydown', (e) => {
         e.preventDefault();
       }
     }
+  }
+});
+
+// ═══════ DRAGGABLE TILES ═══════
+let tileMode = localStorage.getItem('cmux_layout') || 'grid';
+let tilePositions = JSON.parse(localStorage.getItem('cmux_tile_positions') || '{}');
+let _tileDragging = null; // {name, card, startX, startY, origX, origY}
+let _tileJustDragged = false;
+
+function setTileMode(mode) {
+  tileMode = mode;
+  localStorage.setItem('cmux_layout', mode);
+  const cards = document.querySelector('.cards');
+  if (!cards) return;
+  document.getElementById('tile-grid-btn').classList.toggle('active', mode === 'grid');
+  document.getElementById('tile-free-btn').classList.toggle('active', mode === 'tiles');
+  document.getElementById('tile-arrange-btn').style.display = mode === 'tiles' ? '' : 'none';
+  if (mode === 'tiles') {
+    cards.classList.add('tile-mode');
+    applyTilePositions();
+  } else {
+    cards.classList.remove('tile-mode');
+    cards.querySelectorAll('.card').forEach(c => { c.style.left = ''; c.style.top = ''; });
+  }
+}
+
+function applyTilePositions() {
+  const cards = document.querySelector('.cards');
+  if (!cards) return;
+  const allCards = cards.querySelectorAll('.card[data-session]');
+  const cols = Math.max(1, Math.floor(cards.clientWidth / 360));
+  let maxBottom = 0;
+  allCards.forEach((card, i) => {
+    const name = card.dataset.session;
+    if (tilePositions[name]) {
+      card.style.left = tilePositions[name].x + 'px';
+      card.style.top = tilePositions[name].y + 'px';
+    } else {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      card.style.left = col * 360 + 'px';
+      card.style.top = row * 200 + 'px';
+    }
+    const bottom = parseFloat(card.style.top) + card.offsetHeight;
+    if (bottom > maxBottom) maxBottom = bottom;
+  });
+  cards.style.minHeight = (maxBottom + 40) + 'px';
+}
+
+function autoArrangeTiles() {
+  tilePositions = {};
+  localStorage.removeItem('cmux_tile_positions');
+  applyTilePositions();
+}
+
+function tileMouseDown(e, name) {
+  if (tileMode !== 'tiles' || window.innerWidth < 900) return;
+  // Only start drag from header, ignore buttons
+  if (e.target.closest('.card-menu-btn') || e.target.closest('.btn') || e.target.closest('button')) return;
+  if (e.button !== 0) return;
+  const card = e.target.closest('.card');
+  if (!card) return;
+  _tileDragging = {
+    name,
+    card,
+    startX: e.clientX,
+    startY: e.clientY,
+    origX: parseFloat(card.style.left) || 0,
+    origY: parseFloat(card.style.top) || 0,
+    moved: false,
+  };
+  e.preventDefault();
+}
+
+document.addEventListener('mousemove', function(e) {
+  if (!_tileDragging) return;
+  const dx = e.clientX - _tileDragging.startX;
+  const dy = e.clientY - _tileDragging.startY;
+  if (!_tileDragging.moved && Math.abs(dx) + Math.abs(dy) > 5) {
+    _tileDragging.moved = true;
+    _tileDragging.card.classList.add('tile-dragging');
+  }
+  if (_tileDragging.moved) {
+    const container = _tileDragging.card.parentElement;
+    const newX = Math.max(0, Math.min(_tileDragging.origX + dx, container.clientWidth - _tileDragging.card.offsetWidth));
+    const newY = Math.max(0, _tileDragging.origY + dy);
+    _tileDragging.card.style.left = newX + 'px';
+    _tileDragging.card.style.top = newY + 'px';
+  }
+});
+
+document.addEventListener('mouseup', function(e) {
+  if (!_tileDragging) return;
+  _tileDragging.card.classList.remove('tile-dragging');
+  if (_tileDragging.moved) {
+    _tileJustDragged = true;
+    tilePositions[_tileDragging.name] = {
+      x: parseFloat(_tileDragging.card.style.left) || 0,
+      y: parseFloat(_tileDragging.card.style.top) || 0,
+    };
+    localStorage.setItem('cmux_tile_positions', JSON.stringify(tilePositions));
+    // Update container height
+    const cards = _tileDragging.card.parentElement;
+    let maxBottom = 0;
+    cards.querySelectorAll('.card').forEach(c => {
+      const b = parseFloat(c.style.top || 0) + c.offsetHeight;
+      if (b > maxBottom) maxBottom = b;
+    });
+    cards.style.minHeight = (maxBottom + 40) + 'px';
+  }
+  _tileDragging = null;
+});
+
+// Initialize tile mode on load
+document.addEventListener('DOMContentLoaded', function() {
+  if (tileMode === 'tiles' && window.innerWidth >= 900) {
+    setTimeout(() => setTileMode('tiles'), 100);
+  } else {
+    // Ensure buttons reflect initial state
+    const gridBtn = document.getElementById('tile-grid-btn');
+    const freeBtn = document.getElementById('tile-free-btn');
+    if (gridBtn) gridBtn.classList.add('active');
+    if (freeBtn) freeBtn.classList.remove('active');
   }
 });
 
