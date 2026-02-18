@@ -5738,6 +5738,34 @@ class CCHandler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/":
             return self._html(DASHBOARD_HTML)
 
+        # GET /clear — unregister SW + wipe caches, then redirect to /
+        if method == "GET" and path == "/clear":
+            body = b"""<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width">
+<style>body{font-family:system-ui;background:#0d1117;color:#e6edf3;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:12px;font-size:1rem;}</style>
+</head><body>
+<div>Clearing cache\u2026</div>
+<script>
+(async () => {
+  if ('serviceWorker' in navigator) {
+    const regs = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(regs.map(r => r.unregister()));
+  }
+  const keys = await caches.keys();
+  await Promise.all(keys.map(k => caches.delete(k)));
+  localStorage.clear();
+  location.replace('/');
+})();
+</script></body></html>"""
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         # PWA assets
         if method == "GET" and path == "/manifest.json":
             return self._raw(PWA_MANIFEST.encode(), "application/manifest+json", cache=True)
