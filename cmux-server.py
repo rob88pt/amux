@@ -744,7 +744,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   @media (max-width: 480px) {
     .search-input { width: 70px; flex-shrink: 1; min-width: 0; }
     .search-input:focus { width: 110px; }
-    .header-row { gap: 4px; flex-wrap: nowrap; overflow: hidden; }
+    .header-row { gap: 4px; flex-wrap: nowrap; }
     .header-row h1 { font-size: 1.1rem; flex-shrink: 0; }
     .header-row > div { gap: 6px !important; flex-shrink: 1; min-width: 0; }
   }
