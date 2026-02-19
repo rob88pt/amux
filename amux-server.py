@@ -3624,6 +3624,7 @@ async function syncPeekMemory() {
 
 function openPeek(name) {
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
+  clearPeekFiles();  // clear any stale attachments from previous peek
   peekSession = name;
   peekSessionDir = (sessions.find(s => s.name === name) || {}).dir || '';
   // Reset to terminal tab
@@ -4010,11 +4011,12 @@ async function sendPeekCmd() {
   const files = peekFiles.filter(f => f.path); // only successfully uploaded
   if (!text && files.length === 0) return;
 
-  // Build message: user text + file paths for Claude to read
+  // Build message: inline @path references (no newlines — tmux treats \n as Enter,
+  // which would split the message and send the path as a separate submit)
   let message = text;
   if (files.length > 0) {
-    const paths = files.map(f => f.path).join('\n');
-    message = text ? `${text}\n\n${paths}` : paths;
+    const refs = files.map(f => '@' + f.path).join(' ');
+    message = text ? `${text} ${refs}` : refs;
   }
 
   inp.value = '';
