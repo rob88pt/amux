@@ -5054,12 +5054,14 @@ async function fetchBoard() {
     consecutiveFailures = 0;
     if (!online) setOnline(true);
     const sj = JSON.stringify(statusData);
-    if (sj !== lastStatusesJSON) {
+    const j = JSON.stringify(data);
+    const statusesChanged = sj !== lastStatusesJSON;
+    const itemsChanged = j !== lastBoardJSON;
+    if (statusesChanged) {
       lastStatusesJSON = sj;
       boardStatuses = statusData;
     }
-    const j = JSON.stringify(data);
-    if (j !== lastBoardJSON || sj !== lastStatusesJSON) {
+    if (itemsChanged || statusesChanged) {
       lastBoardJSON = j;
       boardItems = data;
       localStorage.setItem('amux_board_cache', j);
