@@ -3943,7 +3943,13 @@ async function uploadAndAttach(file) {
 
   try {
     const buf = await file.arrayBuffer();
-    const b64 = btoa(String.fromCharCode(...new Uint8Array(buf)));
+    // Chunk the conversion to avoid call-stack overflow on large files
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 8192) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+    }
+    const b64 = btoa(binary);
     const r = await fetch(API + '/api/upload', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -3953,7 +3959,8 @@ async function uploadAndAttach(file) {
     if (!r.ok || d.error) { showToast('Upload failed: ' + (d.error || r.status)); peekFiles.splice(idx, 1); }
     else { peekFiles[idx] = { name: file.name, path: d.path, url: d.url, isImage, previewUrl }; }
   } catch(e) {
-    showToast('Upload failed'); peekFiles.splice(idx, 1);
+    console.error('Upload error:', e);
+    showToast('Upload failed: ' + e.message); peekFiles.splice(idx, 1);
   }
   renderPeekFiles();
 }
@@ -6352,6 +6359,21 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"error": "invalid base64"}, 400)
             if len(data) > UPLOAD_MAX_BYTES:
                 return self._json({"error": "file too large (max 20 MB)"}, 400)
+            # Validate image files are real images (not corrupt/truncated)
+            IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+            if ext in IMAGE_EXTS:
+                if len(data) < 100:
+                    return self._json({"error": "image too small — likely corrupt"}, 400)
+                # Check magic bytes
+                magic_ok = (
+                    data[:8] == b'\x89PNG\r\n\x1a\n' or           # PNG
+                    data[:2] == b'\xff\xd8' or                      # JPEG
+                    data[:6] in (b'GIF87a', b'GIF89a') or          # GIF
+                    data[:4] == b'RIFF' and data[8:12] == b'WEBP' or  # WebP
+                    data[:2] == b'BM'                               # BMP
+                )
+                if not magic_ok:
+                    return self._json({"error": "file does not appear to be a valid image"}, 400)
             uid = uuid.uuid4().hex[:8]
             save_name = f"{uid}-{filename}"
             save_path = CC_UPLOADS / save_name
