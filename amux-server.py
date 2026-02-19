@@ -780,67 +780,38 @@ def _session_actual_cwd(name: str) -> str | None:
 
 
 def _session_mem_file(name: str) -> Path:
-    """Return the MEMORY.md file Claude is actually using for this session.
+    """Return the per-session MEMORY.md file stored in ~/.amux/memory/.
 
-    Priority:
-    1. Actual tmux pane CWD (authoritative — Claude uses whatever dir it started in)
-    2. CC_DIR from session config (for stopped sessions)
-    3. Name-based fallback
-
-    Always reads/writes Claude's own project memory dir directly so the peek
-    panel shows exactly what Claude sees, regardless of symlink state.
+    Memory is keyed by session name so each session has its own independent memory.
     """
-    # Try actual CWD from running tmux pane first
-    cwd = _session_actual_cwd(name)
-    if cwd:
-        pname = _project_name(cwd)
-        claude_mem = CLAUDE_HOME / "projects" / pname / "memory" / "MEMORY.md"
-        if claude_mem.exists():
-            return claude_mem
-        # Also check our managed file
-        amux_mem = CC_MEMORY / f"{pname}.md"
-        if amux_mem.exists():
-            return amux_mem
-        return claude_mem  # return the (non-existing) path so writes go there
-
-    # Fall back to CC_DIR from config
-    env_file = CC_SESSIONS / f"{name}.env"
-    if env_file.exists():
-        cfg = parse_env_file(env_file)
-        work_dir = cfg.get("CC_DIR", "").strip()
-        if work_dir:
-            pname = _project_name(work_dir)
-            claude_mem = CLAUDE_HOME / "projects" / pname / "memory" / "MEMORY.md"
-            if claude_mem.exists():
-                return claude_mem
-            return CC_MEMORY / f"{pname}.md"
-
     return CC_MEMORY / f"{name}.md"
 
 
 def _ensure_memory(name: str, work_dir: str):
-    """Ensure a memory file exists for this project dir and is symlinked into Claude's project path.
+    """Ensure a per-session memory file exists and is symlinked into Claude's project path.
 
-    Memory is keyed by resolved CC_DIR (not session name) so sessions sharing
-    the same directory share one memory file and never conflict on the symlink.
+    Memory is keyed by session name (not project dir) so each session always has
+    its own independent memory regardless of whether sessions share a working dir.
     """
+    mem_file = CC_MEMORY / f"{name}.md"
     pname = _project_name(work_dir)
-    mem_file = CC_MEMORY / f"{pname}.md"
 
-    # Migrate legacy session-named file if it has content
-    old_mem_file = CC_MEMORY / f"{name}.md"
-    if old_mem_file.exists() and old_mem_file != mem_file:
-        old_content = old_mem_file.read_text(errors="replace").strip()
+    # Migrate: if old project-keyed file exists and per-session file is empty/missing, absorb it
+    old_project_mem = CC_MEMORY / f"{pname}.md"
+    if old_project_mem.exists() and old_project_mem.resolve() != mem_file.resolve():
+        old_content = old_project_mem.read_text(errors="replace").strip()
         if old_content:
             current = mem_file.read_text(errors="replace").strip() if mem_file.exists() else ""
-            if old_content not in current:
+            if not current:
+                mem_file.write_text(old_content + "\n")
+            elif old_content not in current:
                 mem_file.write_text((current + "\n\n" + old_content).strip() + "\n")
-        old_mem_file.unlink()
+        # Keep the old project file — other sessions may still reference it
 
     if not mem_file.exists():
         mem_file.write_text("")
 
-    # Create/repair symlink in Claude's project memory dir
+    # Create/repair symlink in Claude's project memory dir so Claude picks up this session's memory
     claude_mem_dir = CLAUDE_HOME / "projects" / pname / "memory"
     claude_mem_file = claude_mem_dir / "MEMORY.md"
     try:
@@ -3047,7 +3018,18 @@ function render() {
     }
   } else {
     // list mode (flat) or group mode with active filter: flat list
-    el.innerHTML = draftCards + filtered.map(_renderSessionCard).join('');
+    let flatList = filtered;
+    if (layoutMode === 'list' && cardOrder.length && !activeTag && !q) {
+      const orderMap = {};
+      cardOrder.forEach((n, i) => { orderMap[n] = i; });
+      flatList = [...filtered].sort((a, b) => {
+        const ai = orderMap[a.name] !== undefined ? orderMap[a.name] : 9999;
+        const bi = orderMap[b.name] !== undefined ? orderMap[b.name] : 9999;
+        return ai - bi;
+      });
+    }
+    el.innerHTML = draftCards + flatList.map(_renderSessionCard).join('');
+    if (layoutMode === 'list') requestAnimationFrame(initSortable);
   }
 
   // Restore input values and focus after re-rendering
@@ -4663,12 +4645,12 @@ function setLayoutMode(mode) {
   document.getElementById('tile-grid-btn').classList.toggle('active', mode === 'grid');
   const cards = document.querySelector('.cards');
   if (cards) cards.classList.toggle('grid-mode', mode === 'grid');
-  if (mode !== 'grid') destroySortable();
+  if (mode === 'group') destroySortable();
   render();
 }
 
 function initSortable() {
-  if (typeof Sortable === 'undefined' || window.innerWidth < 900) return;
+  if (typeof Sortable === 'undefined') return;
   destroySortable();
   const cards = document.querySelector('.cards');
   if (!cards) return;
@@ -4709,6 +4691,7 @@ document.addEventListener('DOMContentLoaded', function() {
   } else {
     layoutMode = 'list';
     document.getElementById('tile-list-btn').classList.add('active');
+    setTimeout(initSortable, 200);
   }
 });
 
