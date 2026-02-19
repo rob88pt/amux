@@ -1150,12 +1150,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   .card {
     background: var(--card); border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px 16px; cursor: pointer;
+    border-radius: 10px; padding: 14px 16px; cursor: default;
     transition: border-color 0.15s; overflow: hidden;
     -webkit-tap-highlight-color: transparent; min-width: 0;
+    user-select: text; -webkit-user-select: text;
   }
   .card:active { border-color: var(--accent); }
-  .card-header { display: flex; align-items: center; gap: 10px; position: relative; min-width: 0; }
+  .card-header { display: flex; align-items: center; gap: 10px; position: relative; min-width: 0; cursor: grab; }
+  .card-header:active { cursor: grabbing; }
   .card-menu-btn {
     width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border);
     background: transparent; color: var(--dim); cursor: pointer;
@@ -4040,6 +4042,8 @@ async function refreshPeek() {
     const output = data.output || '(no output)';
     const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
     const newHTML = linkifyOutput(stripAnsi(output));
+    // Re-check: user may have started selecting text during the async fetch
+    if (peekSelecting || (window.getSelection()?.toString().length > 0)) return;
     // Clear sending indicator when output changes
     if (_sendingSnapshot && newHTML !== _sendingSnapshot) clearSendingIndicator();
     lastPeekHTML = newHTML;
@@ -4891,12 +4895,11 @@ function initSortable() {
   const cards = document.querySelector('.cards');
   if (!cards) return;
   _sortable = Sortable.create(cards, {
+    handle: '.card-header',
     animation: 150,
     ghostClass: 'sortable-ghost',
     chosenClass: 'sortable-chosen',
     dragClass: 'sortable-drag',
-    filter: '.board-session-group, .board-session-header, button, .card-menu, textarea',
-    preventOnFilter: false,
     delay: 80,
     delayOnTouchOnly: true,
     onStart: function() { _tileJustDragged = false; },
