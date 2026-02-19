@@ -2381,8 +2381,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="peek-memory-panel" class="peek-memory-editor">
     <div style="display:flex;align-items:center;justify-content:space-between;flex-shrink:0;">
       <div class="board-detail-tabs" style="border-bottom:none;margin:0;">
-        <button class="board-detail-tab active" id="pm-tab-edit" onclick="peekMemoryTab('edit')">Edit</button>
+        <button class="board-detail-tab active" id="pm-tab-edit" onclick="peekMemoryTab('edit')">Session</button>
         <button class="board-detail-tab" id="pm-tab-preview" onclick="peekMemoryTab('preview')">Preview</button>
+        <button class="board-detail-tab" id="pm-tab-global" onclick="peekMemoryTab('global')" title="Global memory shared by all sessions">Global</button>
       </div>
       <div style="display:flex;gap:6px;">
         <button class="btn" id="peek-memory-sync" onclick="syncPeekMemory()" title="Ask Claude to update its memory now">Sync</button>
@@ -2392,6 +2393,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <textarea id="peek-memory-input" class="peek-memory-textarea"
       placeholder="No memory yet. Add notes, context, or conventions that Claude should always remember for this session..."></textarea>
     <div id="peek-memory-preview" class="board-detail-preview" style="display:none;flex:1;overflow-y:auto;min-height:0;"></div>
+    <textarea id="peek-global-input" class="peek-memory-textarea" style="display:none;"
+      placeholder="Global memory — applied to ALL sessions. Add conventions, tools, or preferences shared across all your sessions..."></textarea>
   </div>
 </div>
 
@@ -3131,7 +3134,7 @@ function render() {
       return ai - bi;
     });
     el.innerHTML = draftCards + sortedFiltered.map(_renderSessionCard).join('');
-    for (const [id, val] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) inp.value = val; }
+    for (const [id, val] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) { inp.value = val; autoGrow(inp); } }
     if (focusedId) { const inp = document.getElementById(focusedId); if (inp) inp.focus({ preventScroll: true }); }
     requestAnimationFrame(initSortable);
     return;
@@ -3218,7 +3221,7 @@ function render() {
   // Restore input values and focus after re-rendering
   for (const [id, val] of Object.entries(savedInputs)) {
     const inp = document.getElementById(id);
-    if (inp) inp.value = val;
+    if (inp) { inp.value = val; autoGrow(inp); }
   }
   if (focusedId) {
     const inp = document.getElementById(focusedId);
@@ -3723,16 +3726,32 @@ function setPeekTab(tab) {
 function peekMemoryTab(tab) {
   document.getElementById('pm-tab-edit').classList.toggle('active', tab === 'edit');
   document.getElementById('pm-tab-preview').classList.toggle('active', tab === 'preview');
+  document.getElementById('pm-tab-global').classList.toggle('active', tab === 'global');
   const inp = document.getElementById('peek-memory-input');
   const preview = document.getElementById('peek-memory-preview');
-  if (tab === 'preview') {
+  const globalInp = document.getElementById('peek-global-input');
+  const syncBtn = document.getElementById('peek-memory-sync');
+  const saveBtn = document.getElementById('peek-memory-save');
+  if (tab === 'global') {
     inp.style.display = 'none';
-    preview.style.display = '';
-    preview.innerHTML = renderMarkdown(inp.value) || '<span style="color:var(--dim);font-size:0.85rem;">Nothing to preview</span>';
-  } else {
-    inp.style.display = '';
     preview.style.display = 'none';
-    inp.focus();
+    globalInp.style.display = '';
+    syncBtn.style.visibility = 'hidden';
+    saveBtn.onclick = saveGlobalMemory;
+    loadGlobalMemory();
+  } else {
+    globalInp.style.display = 'none';
+    syncBtn.style.visibility = '';
+    saveBtn.onclick = savePeekMemory;
+    if (tab === 'preview') {
+      inp.style.display = 'none';
+      preview.style.display = '';
+      preview.innerHTML = renderMarkdown(inp.value) || '<span style="color:var(--dim);font-size:0.85rem;">Nothing to preview</span>';
+    } else {
+      inp.style.display = '';
+      preview.style.display = 'none';
+      inp.focus();
+    }
   }
 }
 async function loadPeekMemory() {
@@ -3784,6 +3803,40 @@ async function syncPeekMemory() {
   } catch(e) {
     btn.disabled = false; btn.textContent = 'Sync';
     showToast('Failed to send sync request');
+  }
+}
+
+let _globalMemLoaded = false;
+async function loadGlobalMemory() {
+  const inp = document.getElementById('peek-global-input');
+  const save = document.getElementById('peek-memory-save');
+  if (_globalMemLoaded) { inp.focus(); return; }
+  inp.value = 'Loading...'; inp.disabled = true; save.disabled = true;
+  try {
+    const r = await fetch(API + '/api/memory/global');
+    const data = await r.json();
+    inp.value = data.content || '';
+    _globalMemLoaded = true;
+  } catch(e) { inp.value = ''; }
+  inp.disabled = false; save.disabled = false;
+  inp.focus();
+}
+async function saveGlobalMemory() {
+  const inp = document.getElementById('peek-global-input');
+  const save = document.getElementById('peek-memory-save');
+  save.disabled = true; save.textContent = 'Saving...';
+  try {
+    await fetch(API + '/api/memory/global', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ content: inp.value })
+    });
+    _globalMemLoaded = false; // force reload next open
+    save.textContent = 'Saved!';
+    showToast('Global memory saved — all sessions will see it');
+    setTimeout(() => { save.disabled = false; save.textContent = 'Save'; }, 1500);
+  } catch(e) {
+    save.disabled = false; save.textContent = 'Save';
+    showToast('Failed to save global memory');
   }
 }
 
