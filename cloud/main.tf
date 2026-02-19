@@ -28,42 +28,35 @@ resource "google_compute_subnetwork" "amux" {
   region        = var.region
 }
 
-# Allow internal + Tailscale only — no public SSH
-resource "google_compute_firewall" "internal" {
-  name    = "amux-allow-internal"
+# Allow Tailscale WireGuard from anywhere (needed for direct peer connections)
+resource "google_compute_firewall" "tailscale" {
+  name    = "amux-allow-tailscale"
   network = google_compute_network.amux.id
 
   allow {
-    protocol = "icmp"
-  }
-  allow {
-    protocol = "tcp"
-    ports    = ["22"]
-  }
-  allow {
     protocol = "udp"
-    ports    = ["41641"] # Tailscale WireGuard
+    ports    = ["41641"]
   }
 
-  source_ranges = ["10.10.0.0/24"]
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["amux"]
 }
 
-# ---------- Static internal IP ----------
+# Block all other inbound (default GCP behavior, explicit for clarity)
+resource "google_compute_firewall" "deny_inbound" {
+  name     = "amux-deny-inbound"
+  network  = google_compute_network.amux.id
+  priority = 1000
 
-resource "google_compute_address" "amux_internal" {
-  name         = "amux-internal-ip"
-  address_type = "INTERNAL"
-  subnetwork   = google_compute_subnetwork.amux.id
-  region       = var.region
-}
+  deny {
+    protocol = "tcp"
+  }
+  deny {
+    protocol = "udp"
+  }
 
-# ---------- Storage disk ----------
-
-resource "google_compute_disk" "storage" {
-  name = "amux-storage"
-  type = "pd-standard"
-  size = var.storage_disk_size_gb
-  zone = var.zone
+  source_ranges = ["0.0.0.0/0"]
+  target_tags   = ["amux"]
 }
 
 # ---------- VM ----------
@@ -83,15 +76,12 @@ resource "google_compute_instance" "amux" {
     }
   }
 
-  attached_disk {
-    source      = google_compute_disk.storage.id
-    device_name = "amux-storage"
-  }
-
   network_interface {
     subnetwork = google_compute_subnetwork.amux.id
-    network_ip = google_compute_address.amux_internal.address
-    # No access_config = no public IP
+
+    # Ephemeral public IP — required for internet access during setup
+    # (apt-get, tailscale install, npm). Inbound is firewall-restricted.
+    access_config {}
   }
 
   # Minimal service account

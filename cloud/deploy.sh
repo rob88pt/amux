@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# amux cloud deploy — provision + deploy + test
+# Usage: ./deploy.sh [--destroy]
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+AMUX_SERVER="$SCRIPT_DIR/../amux-server.py"
+
+log()  { echo "$(tput bold)→$(tput sgr0) $*"; }
+ok()   { echo "$(tput setaf 2)✓$(tput sgr0) $*"; }
+err()  { echo "$(tput setaf 1)✗$(tput sgr0) $*" >&2; exit 1; }
+warn() { echo "$(tput setaf 3)⚠$(tput sgr0) $*"; }
+
+# ── Destroy mode ──
+if [[ "${1:-}" == "--destroy" ]]; then
+  log "Destroying infrastructure..."
+  cd "$SCRIPT_DIR"
+  terraform destroy -auto-approve
+  ok "Destroyed."
+  exit 0
+fi
+
+# ── Check prerequisites ──
+command -v terraform &>/dev/null || err "terraform not found"
+command -v tailscale &>/dev/null || err "tailscale not found"
+[ -f "$AMUX_SERVER" ]           || err "amux-server.py not found at $AMUX_SERVER"
+
+# ── terraform.tfvars ──
+cd "$SCRIPT_DIR"
+if [ ! -f terraform.tfvars ]; then
+  log "terraform.tfvars not found."
+  read -r -p "  GCP project ID [mixpeek-inference-463103]: " PROJECT_ID
+  PROJECT_ID="${PROJECT_ID:-mixpeek-inference-463103}"
+  read -r -s -p "  Tailscale auth key (tskey-auth-...): " TS_KEY
+  echo
+  [ -z "$TS_KEY" ] && err "Tailscale auth key required"
+  cat > terraform.tfvars <<EOF
+project_id         = "$PROJECT_ID"
+tailscale_auth_key = "$TS_KEY"
+EOF
+  ok "terraform.tfvars created"
+fi
+
+# ── Terraform init + apply ──
+log "Initialising Terraform..."
+terraform init -upgrade -input=false 2>&1 | grep -E "provider|Installed|Reusing|error" || true
+
+log "Applying Terraform (this takes ~2 min)..."
+terraform apply -auto-approve -input=false
+PUBLIC_IP=$(terraform output -raw public_ip 2>/dev/null || true)
+ok "VM provisioned — public IP: $PUBLIC_IP"
+
+# ── Wait for Tailscale peer ──
+log "Waiting for amux-cloud to appear in Tailscale (up to 5 min)..."
+TS_HOST=""
+for i in $(seq 1 60); do
+  TS_HOST=$(tailscale status --json 2>/dev/null \
+    | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for peer in d.get('Peer', {}).values():
+    hn = peer.get('HostName', '')
+    dns = peer.get('DNSName', '').rstrip('.')
+    if 'amux-cloud' in hn or 'amux-cloud' in dns:
+        print(dns or hn)
+        break
+" 2>/dev/null || true)
+  if [ -n "$TS_HOST" ]; then
+    ok "Found: $TS_HOST"
+    break
+  fi
+  printf "."
+  sleep 5
+done
+echo
+[ -z "$TS_HOST" ] && err "amux-cloud did not appear in Tailscale after 5 min. Check GCP console logs."
+
+# ── Deploy amux-server.py ──
+log "Deploying amux-server.py to $TS_HOST..."
+# Give SSH service a moment to start
+sleep 5
+scp -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    "$AMUX_SERVER" \
+    "root@$TS_HOST:/opt/amux/amux-server.py"
+ok "amux-server.py deployed"
+
+# ── Start amux service ──
+log "Starting amux service..."
+ssh -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    "root@$TS_HOST" \
+    "systemctl start amux && sleep 3 && systemctl is-active amux"
+ok "amux service started"
+
+# ── Test endpoints ──
+log "Testing API endpoints..."
+sleep 3
+
+AMUX_URL="https://$TS_HOST:8822"
+
+# Test /api/sessions
+SESSIONS=$(curl -sk --max-time 10 "$AMUX_URL/api/sessions" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d)} sessions')" 2>/dev/null || echo "failed")
+echo "  GET /api/sessions → $SESSIONS"
+
+# Test /api/board
+BOARD=$(curl -sk --max-time 10 "$AMUX_URL/api/board" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d)} items')" 2>/dev/null || echo "failed")
+echo "  GET /api/board    → $BOARD"
+
+# Create a test board item
+CREATED=$(curl -sk --max-time 10 -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"GCP deploy test","desc":"Smoke test from deploy.sh","status":"done"}' \
+  "$AMUX_URL/api/board" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','?'))" 2>/dev/null || echo "failed")
+echo "  POST /api/board   → id=$CREATED"
+
+echo ""
+ok "===================================================="
+ok " amux cloud is live!"
+ok "===================================================="
+echo ""
+echo "  Dashboard : $AMUX_URL"
+echo "  SSH       : ssh root@$TS_HOST"
+echo ""
+echo "  Add to your local amux server switcher:"
+echo "    Name : amux-cloud"
+echo "    URL  : $AMUX_URL"
+echo ""
+warn "The VM has a public IP for internet access."
+warn "All inbound except Tailscale UDP 41641 is blocked by firewall."
+warn "Access the dashboard ONLY via Tailscale ($TS_HOST)."

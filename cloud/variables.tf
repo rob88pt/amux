@@ -16,9 +16,9 @@ variable "zone" {
 }
 
 variable "machine_type" {
-  description = "VM machine type"
+  description = "VM machine type (e2-micro ~$7/mo, e2-small ~$13/mo)"
   type        = string
-  default     = "e2-small"
+  default     = "e2-micro"
 }
 
 variable "disk_size_gb" {
@@ -27,14 +27,8 @@ variable "disk_size_gb" {
   default     = 20
 }
 
-variable "storage_disk_size_gb" {
-  description = "Attached HDD for cold storage"
-  type        = number
-  default     = 100
-}
-
 variable "tailscale_auth_key" {
-  description = "Tailscale auth key (reusable, ephemeral recommended)"
+  description = "Tailscale auth key (reusable + ephemeral recommended)"
   type        = string
   sensitive   = true
 }

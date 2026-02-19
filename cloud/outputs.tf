@@ -1,6 +1,6 @@
-output "internal_ip" {
-  description = "Static internal IP of the amux VM"
-  value       = google_compute_address.amux_internal.address
+output "public_ip" {
+  description = "Ephemeral public IP of the amux VM (for internet access during setup only)"
+  value       = google_compute_instance.amux.network_interface[0].access_config[0].nat_ip
 }
 
 output "vm_name" {
@@ -13,7 +13,12 @@ output "zone" {
   value       = google_compute_instance.amux.zone
 }
 
-output "ssh_via_tailscale" {
-  description = "SSH command once Tailscale is up"
-  value       = "ssh user@amux-dev  # via Tailscale hostname"
+output "tailscale_url" {
+  description = "amux dashboard URL once Tailscale is connected"
+  value       = "https://amux-cloud.<tailnet>.ts.net:8822"
+}
+
+output "ssh_command" {
+  description = "SSH via Tailscale (after VM connects)"
+  value       = "ssh root@amux-cloud"
 }
