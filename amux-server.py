@@ -1741,8 +1741,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .cal-day-add:active { background: var(--hover); }
   /* Board collapse */
   .board-col-collapse { background: none; border: none; cursor: pointer; color: var(--dim);
-    font-size: 0.65rem; padding: 1px 3px; border-radius: 3px; line-height: 1; flex-shrink: 0;
-    -webkit-tap-highlight-color: transparent; transition: color 0.15s; }
+    font-size: 0.65rem; padding: 4px 6px; border-radius: 3px; line-height: 1; flex-shrink: 0;
+    -webkit-tap-highlight-color: transparent; transition: color 0.15s; min-width: 28px; min-height: 28px;
+    display: flex; align-items: center; justify-content: center; }
   .board-col-collapse:hover { color: var(--text); }
   .board-col.col-collapsed { min-height: unset !important; }
   .board-col.col-collapsed > :not(.board-col-header) { display: none !important; }
@@ -2266,7 +2267,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-columns {
     display: flex; gap: 12px; overflow-x: scroll;
     -webkit-overflow-scrolling: touch; padding-bottom: 16px; align-items: flex-start;
-    min-height: 200px;
+    min-height: 200px; touch-action: pan-x;
   }
   .board-columns::-webkit-scrollbar { display: none; }
   .board-col {
@@ -5923,9 +5924,9 @@ function renderBoard() {
     const isBuiltIn = builtIn.has(st);
     const collapsed = _collapsedCols.has(st);
     html += '<div class="board-col' + (collapsed ? ' col-collapsed' : '') + '" data-col="' + st + '">';
-    html += '<div class="board-col-header" onclick="toggleColCollapse(\'' + st + '\')" style="cursor:pointer;" title="' + (collapsed ? 'Expand' : 'Collapse') + ' column">';
+    html += '<div class="board-col-header">';
     html += '<span style="display:flex;align-items:center;gap:5px;">';
-    html += '<button class="board-col-collapse" onclick="event.stopPropagation();toggleColCollapse(\'' + st + '\')" tabindex="-1">' + (collapsed ? '&#x25B8;' : '&#x25BE;') + '</button>';
+    html += '<button class="board-col-collapse" onclick="toggleColCollapse(\'' + st + '\')" title="' + (collapsed ? 'Expand' : 'Collapse') + '">' + (collapsed ? '&#x25B8;' : '&#x25BE;') + '</button>';
     html += '<span style="color:' + sty.color + '">' + esc(stObj.label) + '</span>';
     html += '</span>';
     html += '<span style="display:flex;align-items:center;gap:6px;">';
@@ -5961,6 +5962,9 @@ function renderBoard() {
         dragClass: 'board-sortable-drag',
         filter: '.board-col-header, .board-add-btn, .board-empty',
         preventOnFilter: false,
+        delay: 150,
+        delayOnTouchOnly: true,
+        touchStartThreshold: 4,
         onEnd: function(evt) {
           const id = evt.item.dataset.id;
           const newStatus = evt.to.dataset.col;
