@@ -1919,31 +1919,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-tasks-panel { display: none; flex-direction: column; flex: 1; min-height: 0; padding: 14px 16px; gap: 10px; }
   .peek-tasks-panel.active { display: flex; }
   .peek-tasks-add { display: flex; gap: 8px; flex-shrink: 0; }
-  .peek-tasks-add input { flex: 1; background: var(--bg); border: 1px solid var(--border);
-    border-radius: 8px; color: var(--text); font-size: 0.88rem; padding: 8px 10px;
-    outline: none; font-family: inherit; }
-  .peek-tasks-add input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(88,166,255,0.12); }
   .peek-tasks-list { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; }
-  .peek-task-item { display: flex; align-items: flex-start; gap: 8px; padding: 7px 8px;
-    border-radius: 7px; transition: background 0.15s; user-select: none; }
-  .peek-task-item:hover { background: var(--hover); }
-  .peek-task-cb { flex-shrink: 0; width: 16px; height: 16px; margin-top: 2px;
-    appearance: none; -webkit-appearance: none; border: 1.5px solid var(--dim);
-    border-radius: 4px; cursor: pointer; background: transparent; position: relative; }
-  .peek-task-cb:checked { background: var(--accent); border-color: var(--accent); }
-  .peek-task-cb:checked::after { content: ''; position: absolute; left: 4px; top: 1px;
-    width: 5px; height: 9px; border: 2px solid #0a0a0a; border-top: none; border-left: none;
-    transform: rotate(45deg); }
-  .peek-task-text { flex: 1; font-size: 0.87rem; line-height: 1.45; word-break: break-word;
-    cursor: pointer; color: var(--text); }
-  .peek-task-text.done { text-decoration: line-through; color: var(--dim); }
-  .peek-task-del { flex-shrink: 0; background: none; border: none; color: var(--dim);
-    cursor: pointer; font-size: 1rem; padding: 0 2px; line-height: 1; opacity: 0; transition: opacity 0.15s; }
-  .peek-task-item:hover .peek-task-del { opacity: 0.6; }
-  .peek-task-del:hover { opacity: 1 !important; color: var(--red); }
-  .peek-tasks-footer { display: flex; align-items: center; justify-content: space-between;
-    flex-shrink: 0; font-size: 0.78rem; color: var(--dim); padding-top: 4px;
-    border-top: 1px solid var(--border); }
+  .peek-issue-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px;
+    border-radius: 8px; border: 1px solid var(--border); cursor: pointer; transition: background 0.15s; }
+  .peek-issue-item:hover { background: var(--hover); border-color: var(--accent); }
+  .peek-issue-key { font-size: 0.72rem; color: var(--dim); font-family: monospace; flex-shrink: 0; margin-top: 2px; }
+  .peek-issue-title { flex: 1; font-size: 0.87rem; line-height: 1.45; word-break: break-word; }
+  .peek-issue-meta { display: flex; align-items: center; gap: 6px; flex-shrink: 0; flex-direction: column; align-items: flex-end; }
+  .peek-issue-due { font-size: 0.72rem; color: var(--dim); }
 
   /* Card stats */
   .card-stats {
@@ -2698,7 +2681,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <!-- Tab bar -->
   <div class="peek-tabs">
     <button class="peek-tab active" id="peek-tab-terminal" onclick="setPeekTab('terminal')">Terminal</button>
-    <button class="peek-tab" id="peek-tab-tasks" onclick="setPeekTab('tasks')">Tasks</button>
+    <button class="peek-tab" id="peek-tab-issues" onclick="setPeekTab('issues')">Issues</button>
     <button class="peek-tab" id="peek-tab-memory" onclick="setPeekTab('memory')">Memory</button>
   </div>
   <!-- Working directory bar -->
@@ -2748,18 +2731,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div class="peek-drag-hint" style="display:none;">&#128206; Drop to attach</div>
     </div>
   </div>
-  <!-- Tasks panel -->
-  <div id="peek-tasks-panel" class="peek-tasks-panel">
-    <div class="peek-tasks-add">
-      <input id="peek-task-input" type="text" placeholder="Add a task…"
-        onkeydown="if(event.key==='Enter'){event.preventDefault();addPeekTask();}">
-      <button class="btn primary" onclick="addPeekTask()">Add</button>
+  <!-- Issues panel (board issues for this session) -->
+  <div id="peek-issues-panel" class="peek-tasks-panel">
+    <div class="peek-tasks-add" style="gap:10px;">
+      <span id="peek-issues-count" style="flex:1;font-size:0.82rem;color:var(--dim);align-self:center;"></span>
+      <button class="btn primary" style="font-size:0.8rem;padding:5px 12px;" onclick="openBoardAdd('todo')">+ New issue</button>
     </div>
-    <div class="peek-tasks-list" id="peek-tasks-list"></div>
-    <div class="peek-tasks-footer">
-      <span id="peek-tasks-count"></span>
-      <button class="btn" onclick="clearDonePeekTasks()" style="font-size:0.78rem;padding:3px 8px;">Clear done</button>
-    </div>
+    <div class="peek-tasks-list" id="peek-issues-list"></div>
   </div>
   <!-- Memory editor panel -->
   <div id="peek-memory-panel" class="peek-memory-editor">
@@ -4143,90 +4121,37 @@ let _peekTab = 'terminal';
 function setPeekTab(tab) {
   _peekTab = tab;
   document.getElementById('peek-tab-terminal').classList.toggle('active', tab === 'terminal');
-  document.getElementById('peek-tab-tasks').classList.toggle('active', tab === 'tasks');
+  document.getElementById('peek-tab-issues').classList.toggle('active', tab === 'issues');
   document.getElementById('peek-tab-memory').classList.toggle('active', tab === 'memory');
   document.getElementById('peek-terminal-panel').style.display = tab === 'terminal' ? '' : 'none';
-  const tasks = document.getElementById('peek-tasks-panel');
-  if (tab === 'tasks') { tasks.classList.add('active'); renderPeekTasks(); document.getElementById('peek-task-input').focus(); }
-  else { tasks.classList.remove('active'); }
+  const issues = document.getElementById('peek-issues-panel');
+  if (tab === 'issues') { issues.classList.add('active'); renderPeekIssues(); }
+  else { issues.classList.remove('active'); }
   const mem = document.getElementById('peek-memory-panel');
   if (tab === 'memory') { mem.classList.add('active'); loadPeekMemory(); }
   else { mem.classList.remove('active'); }
 }
 
-// ── Peek Tasks ────────────────────────────────────────────────────────────────
-let _peekTasksCache = [];
-
-function _tasksUrl(tid) {
-  const base = API + '/api/sessions/' + encodeURIComponent(peekSession) + '/tasks';
-  return tid ? base + '/' + tid : base;
-}
-
-async function renderPeekTasks() {
-  const list = document.getElementById('peek-tasks-list');
-  const count = document.getElementById('peek-tasks-count');
-  list.innerHTML = '<div style="color:var(--dim);font-size:0.82rem;padding:8px 4px;">Loading…</div>';
-  try {
-    const r = await fetch(_tasksUrl());
-    _peekTasksCache = await r.json();
-  } catch(e) { _peekTasksCache = []; }
-  _renderTaskList();
-}
-
-function _renderTaskList() {
-  const tasks = _peekTasksCache;
-  const list = document.getElementById('peek-tasks-list');
-  const count = document.getElementById('peek-tasks-count');
-  const done = tasks.filter(t => t.done).length;
-  count.textContent = tasks.length ? (done + ' / ' + tasks.length + ' done') : '';
-  if (!tasks.length) {
-    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No tasks yet — add one above.</div>';
+// ── Peek Issues (board issues for this session) ──────────────────────────────
+function renderPeekIssues() {
+  const list = document.getElementById('peek-issues-list');
+  const count = document.getElementById('peek-issues-count');
+  const items = (boardItems || []).filter(i => i.session === peekSession && !i.deleted);
+  count.textContent = items.length ? items.length + ' issue' + (items.length === 1 ? '' : 's') : '';
+  if (!items.length) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.85rem;padding:12px 4px;">No issues for this session yet.</div>';
     return;
   }
-  list.innerHTML = tasks.map(t =>
-    '<div class="peek-task-item" data-id="' + t.id + '">' +
-    '<input type="checkbox" class="peek-task-cb"' + (t.done ? ' checked' : '') +
-      ' onchange="togglePeekTask(\'' + t.id + '\',this.checked)">' +
-    '<span class="peek-task-text' + (t.done ? ' done' : '') + '" onclick="togglePeekTask(\'' + t.id + '\',!' + (!!t.done) + ')">' +
-      esc(t.text) + '</span>' +
-    '<button class="peek-task-del" onclick="deletePeekTask(\'' + t.id + '\')" title="Delete">&#x2715;</button>' +
-    '</div>'
-  ).join('');
-}
-
-async function addPeekTask() {
-  const inp = document.getElementById('peek-task-input');
-  const text = inp.value.trim();
-  if (!text) return;
-  inp.value = '';
-  try {
-    const r = await fetch(_tasksUrl(), { method: 'POST',
-      headers: {'Content-Type':'application/json'}, body: JSON.stringify({text}) });
-    const t = await r.json();
-    _peekTasksCache.push(t);
-    _renderTaskList();
-  } catch(e) {}
-}
-
-async function togglePeekTask(id, done) {
-  const t = _peekTasksCache.find(t => t.id === id);
-  if (t) { t.done = done ? 1 : 0; _renderTaskList(); }
-  try {
-    await fetch(_tasksUrl(id), { method: 'PATCH',
-      headers: {'Content-Type':'application/json'}, body: JSON.stringify({done}) });
-  } catch(e) {}
-}
-
-async function deletePeekTask(id) {
-  _peekTasksCache = _peekTasksCache.filter(t => t.id !== id);
-  _renderTaskList();
-  try { await fetch(_tasksUrl(id), { method: 'DELETE' }); } catch(e) {}
-}
-
-async function clearDonePeekTasks() {
-  _peekTasksCache = _peekTasksCache.filter(t => !t.done);
-  _renderTaskList();
-  try { await fetch(_tasksUrl(), { method: 'DELETE' }); } catch(e) {}
+  list.innerHTML = items.map(item => {
+    const sty = statusStyle(item.status || 'todo');
+    const badge = '<span class="status-badge" style="background:' + sty.bg + ';color:' + sty.color + ';border:1px solid ' + sty.border + ';font-size:0.7rem;padding:1px 6px;border-radius:10px;">' + esc(item.status || 'todo') + '</span>';
+    const due = item.due ? '<span class="peek-issue-due">' + esc(item.due) + '</span>' : '';
+    return '<div class="peek-issue-item" onclick="openBoardDetail(\'' + esc(item.id) + '\')">' +
+      '<span class="peek-issue-key">' + esc(item.id) + '</span>' +
+      '<span class="peek-issue-title">' + esc(item.title) + '</span>' +
+      '<span class="peek-issue-meta">' + badge + due + '</span>' +
+      '</div>';
+  }).join('');
 }
 function peekMemoryTab(tab) {
   document.getElementById('pm-tab-edit').classList.toggle('active', tab === 'edit');
@@ -5991,6 +5916,7 @@ async function saveBoardEdit() {
   const due = dueEl ? dueEl.value : '';
   closeBoardEdit();
   await addBoardItem(title, desc, status, session, tags, due);
+  if (_peekTab === 'issues') renderPeekIssues();
 }
 
 // ── Board detail (full-screen) ──
@@ -6087,6 +6013,8 @@ function closeBoardDetail() {
   document.getElementById('board-detail-overlay').classList.remove('active');
   document.body.style.overflow = '';
   boardDetailId = null;
+  // Refresh peek issues panel if open
+  if (_peekTab === 'issues') renderPeekIssues();
 }
 
 // Swipe right to close board detail
@@ -7970,49 +7898,6 @@ class CCHandler(BaseHTTPRequestHandler):
         if not env_file.exists():
             return self._json({"error": f"session '{name}' not found"}, 404)
 
-        # Tasks — method-agnostic: GET/POST/PATCH/DELETE all handled here
-        if action == "tasks":
-            db = get_db()
-            if method == "GET":
-                rows = db.execute(
-                    "SELECT id, text, done, pos, created, updated FROM tasks WHERE session=? ORDER BY pos, created",
-                    (name,)
-                ).fetchall()
-                return self._json([dict(r) for r in rows])
-            body = self._read_body()
-            if method == "POST":
-                text = body.get("text", "").strip()
-                if not text:
-                    return self._json({"error": "missing text"}, 400)
-                tid = f"{int(time.time()*1000):x}{os.urandom(3).hex()}"
-                now = int(time.time())
-                max_pos = db.execute("SELECT COALESCE(MAX(pos),0) FROM tasks WHERE session=?", (name,)).fetchone()[0]
-                db.execute(
-                    "INSERT INTO tasks (id, session, text, done, pos, created, updated) VALUES (?,?,?,0,?,?,?)",
-                    (tid, name, text, max_pos + 1, now, now)
-                )
-                db.commit()
-                return self._json({"id": tid, "text": text, "done": 0, "pos": max_pos + 1, "created": now, "updated": now}, 201)
-            if method == "PATCH":
-                if not action_subid:
-                    return self._json({"error": "missing task id"}, 400)
-                now = int(time.time())
-                if "done" in body:
-                    db.execute("UPDATE tasks SET done=?, updated=? WHERE id=? AND session=?",
-                               (1 if body["done"] else 0, now, action_subid, name))
-                if "text" in body:
-                    db.execute("UPDATE tasks SET text=?, updated=? WHERE id=? AND session=?",
-                               (body["text"].strip(), now, action_subid, name))
-                db.commit()
-                return self._json({"ok": True})
-            if method == "DELETE":
-                if action_subid:
-                    db.execute("DELETE FROM tasks WHERE id=? AND session=?", (action_subid, name))
-                else:
-                    db.execute("DELETE FROM tasks WHERE session=? AND done=1", (name,))
-                db.commit()
-                return self._json({"ok": True})
-            return self._json({"error": "method not allowed"}, 405)
 
         if method == "GET":
             if action == "peek":

@@ -466,46 +466,19 @@ async function runDesktop(browser) {
     // Clear the input
     await page.$eval('#peek-cmd-input', el => { el.value = ''; el.dispatchEvent(new Event('input')); });
 
-    // ── Tasks tab ──────────────────────────────────────────────────────────────
-    await page.$eval('#peek-tab-tasks', el => el.click());
+    // ── Issues tab (replaces Tasks) ────────────────────────────────────────────
+    await page.$eval('#peek-tab-issues', el => el.click());
     await wait(400);
-    const tasksPanel = await page.$('#peek-tasks-panel');
-    log('Tasks panel opens on Tasks tab click', !!(await tasksPanel?.isVisible()));
-    const taskInput = await page.$('#peek-task-input');
-    log('Task input present', !!taskInput);
-    // Clean up pre-existing tasks for this session before testing
-    const peekSessName = await page.$eval('#peek-title', el => el.textContent.trim()).catch(() => '');
-    if (peekSessName) {
-      const tasksBase = `${BASE}/api/sessions/${encodeURIComponent(peekSessName)}/tasks`;
-      const existingResp = await ctx.request.get(tasksBase).catch(() => null);
-      const existing = existingResp ? await existingResp.json().catch(() => []) : [];
-      if (Array.isArray(existing)) {
-        for (const t of existing) {
-          await ctx.request.delete(`${tasksBase}/${t.id}`).catch(() => {});
-        }
-      }
-      await wait(200);
-      await page.evaluate(() => typeof renderPeekTasks === 'function' && renderPeekTasks());
-      await wait(300);
-    }
-    // Add a task
-    await page.fill('#peek-task-input', 'e2e test task');
-    await page.keyboard.press('Enter');
-    await wait(500);
-    const taskItems = await page.$$('.peek-task-item');
-    log('Task appears after adding', taskItems.length === 1, `${taskItems.length} tasks`);
-    // Check done via checkbox
-    if (taskItems.length > 0) {
-      await page.$eval('.peek-task-cb', el => el.click());
-      await wait(300);
-      const doneClass = await page.$eval('.peek-task-text', el => el.classList.contains('done'));
-      log('Task toggles done state', !!doneClass);
-      // Clear done
-      await page.$eval('button[onclick="clearDonePeekTasks()"]', el => el.click());
-      await wait(300);
-      const remaining = await page.$$('.peek-task-item');
-      log('Clear done removes completed tasks', remaining.length === 0, `${remaining.length} remaining`);
-    }
+    const issuesPanel = await page.$('#peek-issues-panel');
+    log('Issues panel opens on Issues tab click', !!(await issuesPanel?.isVisible()));
+    const newIssueBtn = await page.$('#peek-issues-panel button');
+    log('New issue button present', !!newIssueBtn);
+    // Check issues list renders (may be empty or have items)
+    const issueList = await page.$('#peek-issues-list');
+    log('Issues list element present', !!issueList);
+    // Verify renderPeekIssues function exists
+    const hasRenderFn = await page.evaluate(() => typeof renderPeekIssues === 'function');
+    log('renderPeekIssues function exists', hasRenderFn);
 
     // ── Esc closes peek ────────────────────────────────────────────────────────
     await page.keyboard.press('Escape');
