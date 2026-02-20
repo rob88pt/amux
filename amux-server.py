@@ -912,17 +912,10 @@ def list_sessions() -> list:
         status = ""
         tinfo = tmux_info.get(tmux_name(name), {})
         # last_activity = when the last command was sent from the UI (meta.last_send),
-        # falling back to tmux activity → log mtime → .env mtime for older sessions
+        # falling back to last_started (set when session was started).
+        # Deliberately avoid log/tmux mtime — those update every 60s from the snapshot loop.
         meta = _load_meta(name)
-        last_activity = meta.get("last_send", 0)
-        if not last_activity:
-            last_activity = tinfo.get("activity", 0)
-        if not last_activity:
-            lp = _log_path(name)
-            try:
-                last_activity = int((lp if lp.exists() else f).stat().st_mtime)
-            except Exception:
-                pass
+        last_activity = meta.get("last_send", 0) or meta.get("last_started", 0)
         session_created = tinfo.get("created", 0)
         pane_title = tinfo.get("pane_title", "")
         raw = ""
