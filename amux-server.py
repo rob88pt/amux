@@ -7951,6 +7951,50 @@ class CCHandler(BaseHTTPRequestHandler):
         if not env_file.exists():
             return self._json({"error": f"session '{name}' not found"}, 404)
 
+        # Tasks — method-agnostic: GET/POST/PATCH/DELETE all handled here
+        if action == "tasks":
+            db = get_db()
+            if method == "GET":
+                rows = db.execute(
+                    "SELECT id, text, done, pos, created, updated FROM tasks WHERE session=? ORDER BY pos, created",
+                    (name,)
+                ).fetchall()
+                return self._json([dict(r) for r in rows])
+            body = self._read_body()
+            if method == "POST":
+                text = body.get("text", "").strip()
+                if not text:
+                    return self._json({"error": "missing text"}, 400)
+                tid = f"{int(time.time()*1000):x}{os.urandom(3).hex()}"
+                now = int(time.time())
+                max_pos = db.execute("SELECT COALESCE(MAX(pos),0) FROM tasks WHERE session=?", (name,)).fetchone()[0]
+                db.execute(
+                    "INSERT INTO tasks (id, session, text, done, pos, created, updated) VALUES (?,?,?,0,?,?,?)",
+                    (tid, name, text, max_pos + 1, now, now)
+                )
+                db.commit()
+                return self._json({"id": tid, "text": text, "done": 0, "pos": max_pos + 1, "created": now, "updated": now}, 201)
+            if method == "PATCH":
+                if not action_subid:
+                    return self._json({"error": "missing task id"}, 400)
+                now = int(time.time())
+                if "done" in body:
+                    db.execute("UPDATE tasks SET done=?, updated=? WHERE id=? AND session=?",
+                               (1 if body["done"] else 0, now, action_subid, name))
+                if "text" in body:
+                    db.execute("UPDATE tasks SET text=?, updated=? WHERE id=? AND session=?",
+                               (body["text"].strip(), now, action_subid, name))
+                db.commit()
+                return self._json({"ok": True})
+            if method == "DELETE":
+                if action_subid:
+                    db.execute("DELETE FROM tasks WHERE id=? AND session=?", (action_subid, name))
+                else:
+                    db.execute("DELETE FROM tasks WHERE session=? AND done=1", (name,))
+                db.commit()
+                return self._json({"ok": True})
+            return self._json({"error": "method not allowed"}, 405)
+
         if method == "GET":
             if action == "peek":
                 lines = int(qs.get("lines", ["80"])[0])
@@ -8026,50 +8070,6 @@ class CCHandler(BaseHTTPRequestHandler):
                 if wd:
                     _write_claude_memory(name, wd)
                 return self._json({"ok": True})
-            if action == "tasks":
-                db = get_db()
-                if method == "GET":
-                    rows = db.execute(
-                        "SELECT id, text, done, pos, created, updated FROM tasks WHERE session=? ORDER BY pos, created",
-                        (name,)
-                    ).fetchall()
-                    return self._json([dict(r) for r in rows])
-                body = self._read_body()
-                # POST — create
-                if method == "POST":
-                    text = body.get("text", "").strip()
-                    if not text:
-                        return self._json({"error": "missing text"}, 400)
-                    tid = f"{int(time.time()*1000):x}{os.urandom(3).hex()}"
-                    now = int(time.time())
-                    max_pos = db.execute("SELECT COALESCE(MAX(pos),0) FROM tasks WHERE session=?", (name,)).fetchone()[0]
-                    db.execute(
-                        "INSERT INTO tasks (id, session, text, done, pos, created, updated) VALUES (?,?,?,0,?,?,?)",
-                        (tid, name, text, max_pos + 1, now, now)
-                    )
-                    db.commit()
-                    return self._json({"id": tid, "text": text, "done": 0, "pos": max_pos + 1, "created": now, "updated": now}, 201)
-                # PATCH — update (done/text)
-                if method == "PATCH":
-                    if not action_subid:
-                        return self._json({"error": "missing task id"}, 400)
-                    now = int(time.time())
-                    if "done" in body:
-                        db.execute("UPDATE tasks SET done=?, updated=? WHERE id=? AND session=?",
-                                   (1 if body["done"] else 0, now, action_subid, name))
-                    if "text" in body:
-                        db.execute("UPDATE tasks SET text=?, updated=? WHERE id=? AND session=?",
-                                   (body["text"].strip(), now, action_subid, name))
-                    db.commit()
-                    return self._json({"ok": True})
-                # DELETE — with subid: delete one task; without: delete all done
-                if method == "DELETE":
-                    if action_subid:
-                        db.execute("DELETE FROM tasks WHERE id=? AND session=?", (action_subid, name))
-                    else:
-                        db.execute("DELETE FROM tasks WHERE session=? AND done=1", (name,))
-                    db.commit()
-                    return self._json({"ok": True})
             if action == "start":
                 cfg = parse_env_file(CC_SESSIONS / f"{name}.env") if (CC_SESSIONS / f"{name}.env").exists() else {}
                 work_dir = str(Path(cfg.get("CC_DIR", str(Path.home()))).expanduser().resolve())
