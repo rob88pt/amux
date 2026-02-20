@@ -5352,23 +5352,22 @@ document.addEventListener('keydown', (e) => {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'c' || e.key === 'v')) {
     const active = document.activeElement;
     const isEditable = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
-    // Let the browser handle copy/paste natively inside editable elements
-    if (isEditable) return;
-    // For non-editable areas (e.g. terminal output): suppress beep and handle manually
-    e.preventDefault();
     if (e.key === 'c') {
+      // In editable: browser handles copy natively
+      if (isEditable) return;
+      // Non-editable (terminal text): suppress OS beep, copy selection manually
+      e.preventDefault();
       const sel = window.getSelection();
-      if (sel && sel.toString().length > 0) navigator.clipboard.writeText(sel.toString());
+      if (sel && sel.toString().length > 0) navigator.clipboard.writeText(sel.toString()).catch(() => {});
     } else {
-      // Paste into the send input when focus is on a non-editable area
-      const target = document.getElementById('peek-cmd-input');
-      if (target) navigator.clipboard.readText().then(text => {
-        const s = target.selectionStart, en = target.selectionEnd;
-        target.value = target.value.slice(0, s) + text + target.value.slice(en);
-        target.selectionStart = target.selectionEnd = s + text.length;
-        target.dispatchEvent(new Event('input'));
-        target.focus();
-      });
+      // Ctrl/Cmd-V: always let browser paste natively
+      // If focus is on the terminal (non-editable), redirect to send input first
+      // so the browser pastes there — no clipboard-read permission needed
+      if (!isEditable) {
+        const target = document.getElementById('peek-cmd-input');
+        if (target) target.focus();
+      }
+      // Don't preventDefault — browser handles the paste into whatever is now focused
     }
   }
 });
