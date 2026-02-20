@@ -2653,9 +2653,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <!-- Peek overlay -->
 <div id="peek-overlay" class="overlay">
-  <div class="overlay-header">
-    <div style="display:flex;align-items:center;gap:8px;">
-      <h2 id="peek-title">peek</h2>
+  <div class="overlay-header" style="flex-direction:column;gap:6px;padding-bottom:10px;">
+    <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+      <h2 id="peek-title" style="margin:0;font-size:1.05rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">peek</h2>
+      <span id="peek-session-status"></span>
     </div>
     <div style="display:flex;gap:8px;align-items:center;">
       <div class="search-wrap" id="peek-search-wrap">
@@ -3365,9 +3366,23 @@ async function fetchSessions() {
 }
 
 // ═══════ RENDERING ═══════
+function updatePeekStatus() {
+  const el = document.getElementById('peek-session-status');
+  if (!el || !peekSession) { if (el) el.innerHTML = ''; return; }
+  const s = sessions.find(s => s.name === peekSession);
+  if (!s) { el.innerHTML = ''; return; }
+  let badge = '';
+  if (s.status === 'active')  badge = '<span class="status-badge active">working</span>';
+  else if (s.status === 'waiting') badge = '<span class="status-badge waiting">needs input</span>';
+  else if (s.status === 'idle')    badge = '<span class="status-badge idle">idle</span>';
+  else if (!s.running)             badge = '<span class="status-badge" style="background:rgba(255,255,255,0.06);color:var(--dim);border:1px solid var(--border);">stopped</span>';
+  el.innerHTML = badge;
+}
+
 function render() {
   // Skip render if a menu or edit overlay is open to prevent DOM clobbering
   if (openMenu || editState || document.getElementById('edit-overlay').classList.contains('active')) return;
+  updatePeekStatus();
   const el = document.getElementById('cards');
   updateActiveCount();
   // Build tag filter bar
@@ -4292,6 +4307,7 @@ function openPeek(name) {
     document.getElementById('peek-cmd-toggle').innerHTML = '&#x25B2; Send command';
   }
   document.getElementById('peek-title').textContent = name;
+  updatePeekStatus();
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   updateConnectionStatus();
   document.getElementById('peek-overlay').classList.add('active');
