@@ -7391,7 +7391,16 @@ class CCHandler(BaseHTTPRequestHandler):
 
         # GET /
         if method == "GET" and path == "/":
-            return self._html(DASHBOARD_HTML)
+            ts = getattr(self.server, "ts_hostname", "")
+            if ts:
+                html = DASHBOARD_HTML.replace("const API = '';",
+                    "const API = '';\n"
+                    "const _TS_HOSTNAME = '" + ts + "';\n"
+                    "if(_TS_HOSTNAME && location.hostname !== _TS_HOSTNAME && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1'){"
+                    "location.replace(location.protocol+'//'+_TS_HOSTNAME+':'+location.port+location.pathname+location.search);}", 1)
+            else:
+                html = DASHBOARD_HTML
+            return self._html(html)
 
         # GET /clear — unregister SW + wipe caches, then redirect to /
         if method == "GET" and path == "/clear":
@@ -8389,8 +8398,51 @@ def _get_tailscale_hostname() -> str:
     return ""
 
 
+def _get_tailscale_ips() -> list:
+    """Get Tailscale IPs (v4 + v6) if available."""
+    for ts_bin in ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "tailscale"]:
+        try:
+            r = subprocess.run([ts_bin, "status", "--self", "--json"],
+                               capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                import json as _json
+                data = _json.loads(r.stdout)
+                return data.get("Self", {}).get("TailscaleIPs", [])
+        except Exception:
+            continue
+    return []
+
+
+def _ensure_self_signed(lan_ip: str, extra_ips: list = None):
+    """Ensure a self-signed fallback cert exists covering localhost + IPs."""
+    cert_file = TLS_DIR / "cert.pem"
+    key_file = TLS_DIR / "key.pem"
+    if cert_file.exists() and key_file.exists():
+        return str(cert_file), str(key_file)
+    san_parts = ["DNS:localhost", "IP:127.0.0.1", f"IP:{lan_ip}"]
+    for ip in (extra_ips or []):
+        entry = f"IP:{ip}" if ":" not in ip else f"IP:{ip}"
+        if entry not in san_parts:
+            san_parts.append(entry)
+    san = ",".join(san_parts)
+    print(f"\033[2m  Generating self-signed TLS cert...\033[0m")
+    subprocess.run(
+        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+         "-keyout", str(key_file), "-out", str(cert_file),
+         "-days", "365", "-subj", "/CN=amux",
+         "-addext", f"subjectAltName={san}"],
+        capture_output=True, check=True,
+    )
+    return str(cert_file), str(key_file)
+
+
 def _ensure_tls(lan_ip: str) -> tuple:
-    """Ensure TLS cert exists. Tries Tailscale → mkcert → self-signed. Returns (cert, key, hostname)."""
+    """Ensure TLS cert exists. Returns (cert, key, hostname, fallback_ctx_or_None).
+
+    When a Tailscale cert is used, also generates a self-signed fallback cert
+    covering Tailscale IPs so that clients connecting via raw IP get a valid
+    cert (with a one-time browser warning) instead of ERR_CERT_COMMON_NAME_INVALID.
+    """
     TLS_DIR.mkdir(parents=True, exist_ok=True)
 
     # 1. Try Tailscale cert (real Let's Encrypt, trusted everywhere, no CA install)
@@ -8398,25 +8450,33 @@ def _ensure_tls(lan_ip: str) -> tuple:
     if ts_hostname:
         ts_cert = TLS_DIR / f"{ts_hostname}.crt"
         ts_key = TLS_DIR / f"{ts_hostname}.key"
-        if ts_cert.exists() and ts_key.exists():
-            return str(ts_cert), str(ts_key), ts_hostname
-        for ts_bin in ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "tailscale"]:
-            try:
-                print(f"\033[2m  Getting Tailscale cert for {ts_hostname}...\033[0m")
-                r = subprocess.run(
-                    [ts_bin, "cert", "--cert-file", str(ts_cert), "--key-file", str(ts_key), ts_hostname],
-                    capture_output=True, text=True, timeout=30,
-                )
-                if r.returncode == 0 and ts_cert.exists():
-                    return str(ts_cert), str(ts_key), ts_hostname
-            except Exception:
-                continue
+        got_ts = ts_cert.exists() and ts_key.exists()
+        if not got_ts:
+            for ts_bin in ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "tailscale"]:
+                try:
+                    print(f"\033[2m  Getting Tailscale cert for {ts_hostname}...\033[0m")
+                    r = subprocess.run(
+                        [ts_bin, "cert", "--cert-file", str(ts_cert), "--key-file", str(ts_key), ts_hostname],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                    if r.returncode == 0 and ts_cert.exists():
+                        got_ts = True
+                        break
+                except Exception:
+                    continue
+        if got_ts:
+            # Build a fallback self-signed ctx for raw-IP connections
+            ts_ips = _get_tailscale_ips()
+            fb_cert, fb_key = _ensure_self_signed(lan_ip, ts_ips)
+            fb_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            fb_ctx.load_cert_chain(fb_cert, fb_key)
+            return str(ts_cert), str(ts_key), ts_hostname, fb_ctx
 
     # 2. Try mkcert (locally-trusted, no browser warnings on same machine)
     cert_file = TLS_DIR / "cert.pem"
     key_file = TLS_DIR / "key.pem"
     if cert_file.exists() and key_file.exists():
-        return str(cert_file), str(key_file), ""
+        return str(cert_file), str(key_file), "", None
 
     if subprocess.run(["which", "mkcert"], capture_output=True).returncode == 0:
         print(f"\033[2m  Generating trusted TLS cert with mkcert...\033[0m")
@@ -8425,18 +8485,11 @@ def _ensure_tls(lan_ip: str) -> tuple:
              "localhost", "127.0.0.1", lan_ip],
             capture_output=True, check=True,
         )
-        return str(cert_file), str(key_file), ""
+        return str(cert_file), str(key_file), "", None
 
     # 3. Fallback: self-signed via openssl
-    print(f"\033[2m  Generating self-signed TLS cert...\033[0m")
-    subprocess.run(
-        ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-         "-keyout", str(key_file), "-out", str(cert_file),
-         "-days", "365", "-subj", "/CN=amux",
-         "-addext", f"subjectAltName=DNS:localhost,IP:127.0.0.1,IP:{lan_ip}"],
-        capture_output=True, check=True,
-    )
-    return str(cert_file), str(key_file), ""
+    fb_cert, fb_key = _ensure_self_signed(lan_ip)
+    return fb_cert, fb_key, "", None
 
 
 # ── Main ──
@@ -8456,9 +8509,15 @@ def main():
     ts_hostname = ""
     if not no_tls:
         try:
-            cert, key, ts_hostname = _ensure_tls(lan_ip)
+            cert, key, ts_hostname, fb_ctx = _ensure_tls(lan_ip)
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(cert, key)
+            # SNI callback: use Tailscale cert for hostname, fallback for IPs
+            if ts_hostname and fb_ctx:
+                def _sni_cb(sock, server_name, orig_ctx):
+                    if server_name != ts_hostname:
+                        sock.context = fb_ctx
+                ctx.sni_callback = _sni_cb
             server.ssl_ctx = ctx  # per-connection TLS in process_request_thread()
             server.ts_hostname = ts_hostname  # for IP→hostname redirect
             scheme = "https"
