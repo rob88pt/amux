@@ -2168,8 +2168,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s, transform 0.35s cubic-bezier(.4,0,.2,1), opacity 0.3s;
     -webkit-tap-highlight-color: transparent;
     will-change: transform, opacity;
+    position: relative;
   }
   .board-card:active { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(88,166,255,0.2); }
+  .board-drag-handle {
+    position: absolute; top: 8px; right: 8px;
+    width: 18px; height: 18px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: grab; color: var(--dim); opacity: 0;
+    transition: opacity 0.15s;
+    border-radius: 3px;
+  }
+  .board-drag-handle:active { cursor: grabbing; }
+  .board-card:hover .board-drag-handle { opacity: 0.55; }
+  .board-drag-handle:hover { opacity: 1 !important; color: var(--fg); background: rgba(139,148,158,0.12); }
+  @media (hover: none) { .board-drag-handle { display: none; } }
   .board-card.card-enter { animation: cardEnter 0.3s cubic-bezier(.4,0,.2,1) both; }
   .board-card.card-flip { transition: transform 0.35s cubic-bezier(.4,0,.2,1); }
   @keyframes cardEnter {
@@ -5507,6 +5520,7 @@ function _renderBoardCard(item) {
   const tags = item.tags || [];
   const firstLine = (item.desc || '').split('\n')[0].slice(0, 80);
   let h = '<div class="board-card" data-id="' + item.id + '" onclick="openBoardDetail(\'' + item.id + '\')">';
+  h += '<div class="board-drag-handle" onclick="event.stopPropagation()" title="Drag to move"><svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><circle cx="3.5" cy="2.5" r="1.25"/><circle cx="8.5" cy="2.5" r="1.25"/><circle cx="3.5" cy="6" r="1.25"/><circle cx="8.5" cy="6" r="1.25"/><circle cx="3.5" cy="9.5" r="1.25"/><circle cx="8.5" cy="9.5" r="1.25"/></svg></div>';
   h += '<div class="board-card-key">' + esc(item.id) + '</div>';
   h += '<div class="board-card-title">';
   if (boardViewMode === 'session') { const _st = item.status || 'todo'; h += '<span class="board-status-dot" style="background:' + statusStyle(_st).dot + '"></span>'; }
@@ -5660,13 +5674,12 @@ function renderBoard() {
       _boardSortables.push(Sortable.create(colEl, {
         group: 'board',
         animation: 150,
+        handle: '.board-drag-handle',
         ghostClass: 'board-sortable-ghost',
         chosenClass: 'board-sortable-chosen',
         dragClass: 'board-sortable-drag',
         filter: '.board-col-header, .board-add-btn, .board-empty',
         preventOnFilter: false,
-        delay: 150,
-        delayOnTouchOnly: true,
         onEnd: function(evt) {
           const id = evt.item.dataset.id;
           const newStatus = evt.to.dataset.col;
