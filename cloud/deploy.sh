@@ -29,8 +29,8 @@ command -v tailscale &>/dev/null || err "tailscale not found"
 cd "$SCRIPT_DIR"
 if [ ! -f terraform.tfvars ]; then
   log "terraform.tfvars not found."
-  read -r -p "  GCP project ID [mixpeek-inference-463103]: " PROJECT_ID
-  PROJECT_ID="${PROJECT_ID:-mixpeek-inference-463103}"
+  read -r -p "  GCP project ID: " PROJECT_ID
+  [ -z "$PROJECT_ID" ] && err "GCP project ID required"
   read -r -s -p "  Tailscale auth key (tskey-auth-...): " TS_KEY
   echo
   [ -z "$TS_KEY" ] && err "Tailscale auth key required"
