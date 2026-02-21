@@ -5937,6 +5937,15 @@ document.addEventListener('keydown', (e) => {
 
   if (document.getElementById('grid-view').classList.contains('active')) {
     if (e.key === 'Escape') { e.preventDefault(); exitGridMode(); return; }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !e.altKey && !e.shiftKey) {
+      const hasSelection = window.getSelection().toString().length > 0;
+      if (!hasSelection) {
+        const names = Object.keys(_gridPanes);
+        const target = _lastActivePane && _gridPanes[_lastActivePane] ? _lastActivePane
+          : names.length === 1 ? names[0] : null;
+        if (target) { e.preventDefault(); gpDoKeys(target, 'C-c'); return; }
+      }
+    }
     return;
   }
   if (document.getElementById('board-detail-overlay').classList.contains('active')) {
@@ -5946,14 +5955,17 @@ document.addEventListener('keydown', (e) => {
   }
   if (!document.getElementById('peek-overlay').classList.contains('active')) return;
   if (e.key === 'Escape') { e.preventDefault(); closePeek(); return; }
-  // Cmd/Ctrl+C with no selection → send interrupt; Cmd/Ctrl+X → send Ctrl-X
+  // Ctrl+C with no selection → send interrupt; Ctrl+X (outside input) → send Ctrl-X
   if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
     const ae = document.activeElement;
     const inInput = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA');
-    const hasSelection = window.getSelection().toString().length > 0;
-    if (!inInput && !hasSelection) {
-      if (e.key === 'c') { e.preventDefault(); peekQuickKeys('C-c'); return; }
-      if (e.key === 'x') { e.preventDefault(); peekQuickKeys('C-x'); return; }
+    const hasPageSelection = window.getSelection().toString().length > 0;
+    const hasInputSelection = inInput && ae.selectionStart !== ae.selectionEnd;
+    if (e.key === 'c' && !hasPageSelection && !hasInputSelection) {
+      e.preventDefault(); peekQuickKeys('C-c'); return;
+    }
+    if (e.key === 'x' && !inInput && !hasPageSelection) {
+      e.preventDefault(); peekQuickKeys('C-x'); return;
     }
   }
 });
@@ -7157,6 +7169,7 @@ function _renderCalDay(titleEl, bodyEl) {
 // ═══════ GRID MODE ═══════
 let _grid = null;
 let _gridPanes = {}; // session name → { widget, timer }
+let _lastActivePane = null; // most recently interacted pane name
 
 function _gpSafeId(name) {
   return 'gp-' + name.replace(/[^a-zA-Z0-9]/g, '_');
@@ -7232,7 +7245,7 @@ function addGridPane(name, x, y, w, h) {
       '<span class="gp-title">' + esc(name) + '</span>' +
       '<button class="gp-close" onclick="removeGridPane(\'' + safeName + '\')">&#x2715;</button>' +
     '</div>' +
-    '<div class="gp-body" id="' + sid + '-body">Loading\u2026</div>' +
+    '<div class="gp-body" id="' + sid + '-body" onclick="_lastActivePane=\'' + safeName + '\'">Loading\u2026</div>' +
     '<div class="gp-send">' +
       '<div class="gp-chips chips">' +
         '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'C-c\')">Ctrl-C</div>' +
@@ -7248,6 +7261,7 @@ function addGridPane(name, x, y, w, h) {
       '<div class="gp-send-row">' +
         '<textarea class="gp-send-input" id="' + sid + '-input" rows="1" placeholder="Send\u2026"' +
           ' oninput="autoGrow(this);cmdHistoryReset()"' +
+          ' onfocus="_lastActivePane=\'' + safeName + '\'"' +
           ' onkeydown="gpSendKeydown(\'' + safeName + '\',event)"></textarea>' +
         '<button class="gp-send-btn" onclick="sendGridCmd(\'' + safeName + '\')">&#x21B5;</button>' +
       '</div>' +
@@ -7410,6 +7424,9 @@ function gpSendKeydown(name, e) {
   const inp = document.getElementById(_gpSafeId(name) + '-input');
   if (e.key === 'Enter' && !e.shiftKey) {
     sendGridCmd(name); e.preventDefault();
+  } else if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !e.altKey && !e.shiftKey) {
+    const hasSelection = inp && inp.selectionStart !== inp.selectionEnd;
+    if (!hasSelection) { e.preventDefault(); gpDoKeys(name, 'C-c'); }
   } else if (e.key === 'ArrowUp' && inp && inp.value.indexOf('\n') === -1) {
     e.preventDefault(); cmdHistoryUp(inp);
   } else if (e.key === 'ArrowDown' && _cmdHistoryIdx !== -1) {
