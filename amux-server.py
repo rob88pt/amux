@@ -2746,6 +2746,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     font-family: "SF Mono","Fira Code","Cascadia Code",monospace;
     font-size: 0.76rem; line-height: 1.45; white-space: pre-wrap; word-break: break-all;
     -webkit-overflow-scrolling: touch; color: #c9d1d9;
+    user-select: text; -webkit-user-select: text; cursor: text;
   }
   #gridstack-container .grid-stack-item-content {
     border: 1px solid var(--border); border-radius: 6px;
@@ -7243,7 +7244,7 @@ function addGridPane(name, x, y, w, h) {
       '<span class="gp-title">' + esc(name) + '</span>' +
       '<button class="gp-close" onclick="removeGridPane(\'' + safeName + '\')">&#x2715;</button>' +
     '</div>' +
-    '<div class="gp-body" id="' + sid + '-body" onclick="_lastActivePane=\'' + safeName + '\'">Loading\u2026</div>' +
+    '<div class="gp-body overlay-body" id="' + sid + '-body" onclick="_lastActivePane=\'' + safeName + '\'">Loading\u2026</div>' +
     '<div class="gp-send">' +
       '<div class="chips">' +
         '<div class="chip" onclick="gpDoKeys(\'' + safeName + '\',\'C-c\')">Ctrl-C</div>' +
@@ -7287,9 +7288,9 @@ async function _updateGridPane(name) {
   const dot  = document.getElementById(sid + '-dot');
   if (!body) { removeGridPane(name); return; }
   try {
-    const data = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/peek?lines=120').then(r => r.json());
-    const atBottom = body.scrollHeight - body.scrollTop <= body.clientHeight + 50;
-    body.textContent = stripAnsi(data.output || '');
+    const data = await fetch(API + '/api/sessions/' + encodeURIComponent(name) + '/peek?lines=500').then(r => r.json());
+    const atBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 40;
+    body.innerHTML = linkifyOutput(stripAnsi(data.output || ''));
     if (atBottom) body.scrollTop = body.scrollHeight;
     if (dot) {
       const s = (sessions || []).find(s => s.name === name);
