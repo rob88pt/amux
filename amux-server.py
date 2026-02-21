@@ -1578,6 +1578,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     white-space: nowrap; flex-shrink: 0;
   }
   .chip:active { background: rgba(88,166,255,0.25); }
+  .chip.danger { background: rgba(248,81,73,0.12); color: var(--red); border-color: rgba(248,81,73,0.25); }
+  .chip.danger:active { background: rgba(248,81,73,0.25); }
   .send-row { display: flex; gap: 8px; min-width: 0; overflow: hidden; }
   .send-input {
     flex: 1; min-width: 0; font-size: 1rem; padding: 10px 14px; border-radius: 8px;
@@ -2948,12 +2950,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
           <div class="chip" onclick="peekQuickKeys('Up')">&#x2191;</div>
           <div class="chip" onclick="peekQuickKeys('Down')">&#x2193;</div>
           <div class="chip" onclick="peekQuickKeys('Enter')">Enter</div>
-          <div class="chip" onclick="peekQuickSend('/clear')">/clear</div>
           <div class="chip" onclick="peekQuickSend('/mcp')">/mcp</div>
-          <div class="chip" onclick="peekQuickSend('/compact')">/compact</div>
           <div class="chip" onclick="peekQuickSend('/status')">/status</div>
           <div class="chip" onclick="peekQuickSend('/cost')">/cost</div>
           <div class="chip" onclick="peekQuickKeys('Escape')">Esc</div>
+          <div class="chip danger" onclick="peekQuickSend('/compact')">/compact</div>
+          <div class="chip danger" onclick="peekQuickSend('/clear')">/clear</div>
         </div>
         <!-- Attachment chips -->
         <div class="peek-attach-bar" id="peek-attach-bar"></div>
