@@ -269,6 +269,24 @@
     footer a:hover { color: var(--fg); }
 
     footer .sep { opacity: 0.3; }
+
+    /* ── Demo GIF ────────────────────────────────────────── */
+    .demo-strip {
+      width: 100vw;
+      margin-left: calc(-50vw + 50%);
+      margin-top: 2.5rem;
+      margin-bottom: 2.5rem;
+      overflow: hidden;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: var(--code-bg);
+    }
+
+    .demo-strip img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
   </style>
 </head>
 <body>
@@ -304,6 +322,11 @@
         Docs
       </a>
     </div>
+  </div>
+
+  <!-- ── Demo GIF ──────────────────────────────────────── -->
+  <div class="demo-strip">
+    <img src="amux.gif" alt="amux walkthrough — session cards, peek mode, board, workspace">
   </div>
 
   <!-- ── OSS badge ──────────────────────────────────────── -->
