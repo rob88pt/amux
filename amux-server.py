@@ -2647,7 +2647,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="btn" onclick="calNext()">&#x203A;</button>
     </div>
     <div class="cal-controls-row">
-      <button class="btn" onclick="calToday()">Today</button>
+      <button id="cal-today-btn" class="btn" onclick="calToday()">Today</button>
       <div class="cal-view-tabs">
         <button class="cal-view-tab" id="cal-tab-month" onclick="calSetView('month')">Month</button>
         <button class="cal-view-tab" id="cal-tab-week" onclick="calSetView('week')">Week</button>
@@ -6562,7 +6562,7 @@ function _renderCalMonth(titleEl, bodyEl) {
   const daysInMonth = new Date(calYear, calMonth+1, 0).getDate();
   const daysInPrevMonth = new Date(calYear, calMonth, 0).getDate();
   const itemsByDate = _calItemsByDate();
-  let html = '<div class="cal-grid">';
+  let html = '<div id="cal-grid" class="cal-grid">';
   dayNames.forEach(d => { html += '<div class="cal-day-header">' + d + '</div>'; });
   const totalCells = Math.ceil((firstDay + daysInMonth) / 7) * 7;
   for (let i = 0; i < totalCells; i++) {
@@ -6584,7 +6584,7 @@ function _renderCalMonth(titleEl, bodyEl) {
     const isToday = dateStr === todayStr;
     const items = itemsByDate[dateStr] || [];
     html += '<div class="cal-cell' + (isOther ? ' other-month' : '') + (isToday ? ' today' : '') + '"'
-          + ' onclick="calSelectDay(' + cellY + ',' + cellM + ',' + day + ')">';
+          + ' onclick="openBoardAdd(\'' + dateStr + '\')">';
     html += '<div class="cal-cell-num">' + day + '</div>';
     if (isMob) {
       if (items.length) {
@@ -6634,7 +6634,7 @@ function _renderCalWeek(titleEl, bodyEl) {
     const isToday = ds === todayStr;
     const items = itemsByDate[ds] || [];
     html += '<div class="cal-week-cell' + (isToday ? ' today' : '') + '"'
-          + ' onclick="calSelectDay(' + d.getFullYear() + ',' + d.getMonth() + ',' + d.getDate() + ')">';
+          + ' onclick="openBoardAdd(\'' + ds + '\')">';
     html += '<div class="cal-week-num">' + d.getDate() + '</div>';
     items.slice(0, 4).forEach(item => {
       const sty = statusStyle(item.status || 'todo');

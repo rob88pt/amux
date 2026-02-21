@@ -296,7 +296,18 @@ async function runDesktop(browser) {
   }
 
   // ── Calendar tab ───────────────────────────────────────────────────────────
+  // Create a board item with today's due date so calendar chips render
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const apiCal = await playwrightRequest.newContext({ ignoreHTTPSErrors: true, baseURL: BASE });
+  const calItemResp = await apiCal.post('/api/board', {
+    data: { title: 'E2E calendar chip test', status: 'todo', due: todayISO },
+    headers: { 'Content-Type': 'application/json' }
+  });
+  const calItem = await calItemResp.json();
+
   await page.click('#tab-calendar');
+  // Switch to month view so the month-specific selectors work
+  await page.$eval('#cal-tab-month', el => el.click());
   await waitForCount(page, '.cal-day-header', 7);
   await page.screenshot({ path: '/tmp/amux_desktop_calendar.png' });
 
@@ -381,6 +392,10 @@ async function runDesktop(browser) {
 
   const icalBtn = await page.$('button[onclick="showIcalInfo()"]');
   log('iCal subscribe button present', !!icalBtn);
+
+  // Clean up calendar test item
+  if (calItem?.id) await apiCal.delete(`/api/board/${calItem.id}`);
+  await apiCal.dispose();
 
   // ── Back to sessions ───────────────────────────────────────────────────────
   await page.click('#tab-sessions');
