@@ -2809,7 +2809,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
   <button id="tab-calendar" onclick="switchView('calendar')">Calendar</button>
-  <button id="tab-grid" onclick="enterGridMode()">Grid</button>
+  <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
 </div>
 <div id="session-view">
 <div style="padding:0 12px;margin-top:4px;display:flex;align-items:center;gap:8px;">
@@ -3015,6 +3015,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="peek-dir-bar">
     <span style="flex-shrink:0;opacity:0.6;">&#x1F4C1;</span>
     <span id="peek-dir-text"></span>
+    <span class="card-dir-edit" id="peek-dir-edit" onclick="editField(peekSession,'dir',peekSessionDir)" title="Change directory">&#x270E;</span>
   </div>
   <!-- Terminal panel -->
   <div id="peek-terminal-panel" class="peek-terminal-panel">
@@ -3828,7 +3829,7 @@ function render() {
           ${!online ? '<span class="cached-badge">cached</span>' : ''}
         </div>` : ''}
       </div>
-      ${s.dir ? `<div class="card-dir"><span class="card-dir-path" onclick="event.stopPropagation();openExplore('${s.dir.replace(/'/g,"\\'")}')" style="cursor:pointer;" title="Browse files">${esc(s.dir)}</span>${isExp ? `<span class="card-dir-edit" onclick="event.stopPropagation();editField('${s.name}','dir','${esc(s.dir)}')" title="Change directory">&#x270E;</span>` : ''}</div>` : ''}
+      ${s.dir ? `<div class="card-dir"><span class="card-dir-path" onclick="event.stopPropagation();openExplore('${s.dir.replace(/'/g,"\\'")}')" style="cursor:pointer;" title="Browse files">${esc(s.dir)}</span></div>` : ''}
       ${s.creator ? `<div class="card-dir" style="font-size:0.72rem;">${esc(s.creator)}</div>` : ''}
       ${isExp && s.desc ? `<div class="card-desc">${esc(s.desc)}</div>` : ''}
       ${!isExp && s.task_name ? `<div class="card-preview">${esc(s.task_name)}</div>` : ''}
@@ -5836,18 +5837,37 @@ document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); boardDetailSave(); return; }
     return;
   }
-  // Cmd/Ctrl+V when not in an editable: focus best input so paste lands there
+  // Cmd/Ctrl+V when not in an editable: paste manually via clipboard API.
+  // In macOS desktop PWAs the 'paste' DOM event never fires when focus is on a
+  // non-editable element, even after calling inp.focus(). So we read the
+  // clipboard ourselves and insert the text programmatically.
   if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === 'v') {
     const ae = document.activeElement;
     const inInput = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
     if (!inInput) {
+      e.preventDefault();
       const peekOpen = document.getElementById('peek-overlay')?.classList.contains('active');
       const boardOpen = document.getElementById('board-detail-overlay')?.classList.contains('active');
       const inp = peekOpen ? document.getElementById('peek-cmd-input')
         : boardOpen ? document.querySelector('#board-detail-overlay textarea, #board-detail-overlay input')
         : document.querySelector('.card.open .send-input') || document.getElementById('search');
-      if (inp) inp.focus({ preventScroll: true });
-      // No preventDefault — browser fires paste event into the now-focused element
+      if (inp && navigator.clipboard && navigator.clipboard.readText) {
+        navigator.clipboard.readText().then(text => {
+          if (!text) return;
+          inp.focus({ preventScroll: true });
+          const s = inp.selectionStart ?? inp.value.length;
+          const en = inp.selectionEnd ?? inp.value.length;
+          inp.value = inp.value.slice(0, s) + text + inp.value.slice(en);
+          inp.selectionStart = inp.selectionEnd = s + text.length;
+          inp.dispatchEvent(new Event('input', { bubbles: true }));
+          if (typeof autoGrow === 'function') autoGrow(inp);
+        }).catch(() => {
+          // Clipboard API denied — fall back to focusing so a manual paste can land
+          inp.focus({ preventScroll: true });
+        });
+      } else if (inp) {
+        inp.focus({ preventScroll: true });
+      }
     }
   }
   if (!document.getElementById('peek-overlay').classList.contains('active')) return;
@@ -7073,24 +7093,33 @@ function enterGridMode() {
   ['sessions','board','calendar'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
   document.getElementById('tab-grid').classList.add('active');
   _renderGridChips();
-  if (_grid) return; // already initialized
-  _grid = GridStack.init({
-    cellHeight: 60,
-    minRow: 2,
-    column: 12,
-    margin: 6,
-    animate: true,
-    draggable: { handle: '.gp-header' },
-    resizable: { handles: 'e,se,s,sw,w,n,ne,nw' },
-  }, '#gridstack');
-  _grid.on('change', _gridSaveLayout);
-  _gridRestoreLayout();
+  if (!_grid) {
+    _grid = GridStack.init({
+      cellHeight: 60,
+      minRow: 2,
+      column: 12,
+      margin: 6,
+      animate: true,
+      draggable: { handle: '.gp-header' },
+      resizable: { handles: 'e,se,s,sw,w,n,ne,nw' },
+    }, '#gridstack');
+    _grid.on('change', _gridSaveLayout);
+    _gridRestoreLayout();
+  } else {
+    // Resume paused update timers for existing panes
+    Object.keys(_gridPanes).forEach(name => {
+      if (!_gridPanes[name].timer) {
+        _gridPanes[name].timer = setInterval(() => _updateGridPane(name), 2000);
+        _updateGridPane(name);
+      }
+    });
+  }
 }
 
 function exitGridMode() {
-  Object.values(_gridPanes).forEach(p => { if (p.timer) clearInterval(p.timer); });
-  _gridPanes = {};
-  if (_grid) { try { _grid.destroy(true); } catch(e) {} _grid = null; }
+  // Save current layout, then pause timers — keep grid alive to avoid re-init bugs
+  _gridSaveLayout();
+  Object.values(_gridPanes).forEach(p => { if (p.timer) { clearInterval(p.timer); p.timer = null; } });
   document.getElementById('grid-view').classList.remove('active');
   document.getElementById('tab-grid').classList.remove('active');
   document.getElementById('tab-' + (activeView || 'sessions')).classList.add('active');
@@ -7861,7 +7890,13 @@ function forceUpdate() {
   // ── Clipboard event debug ──
   ['copy','cut','paste'].forEach(evtName => {
     document.addEventListener(evtName, e => {
-      _dtLogPush('info', `[clipboard] ${evtName} — defaultPrevented=${e.defaultPrevented} target=${e.target && e.target.tagName}`);
+      const ae = document.activeElement;
+      const aeDesc = ae ? `${ae.tagName}#${ae.id || ''}${ae.className ? '.'+ae.className.split(' ')[0] : ''}` : 'none';
+      let extra = '';
+      if (evtName === 'paste' && e.clipboardData) {
+        extra = ' types=[' + Array.from(e.clipboardData.types).join(',') + ']';
+      }
+      _dtLogPush('info', `[clipboard] ${evtName}${extra} — target=${e.target && e.target.tagName} activeEl=${aeDesc}`);
     }, true); // capture phase
   });
 
@@ -7869,7 +7904,10 @@ function forceUpdate() {
   const _watchKeys = new Set(['c','v','x','z']);
   document.addEventListener('keydown', e => {
     if ((e.metaKey || e.ctrlKey) && _watchKeys.has(e.key.toLowerCase())) {
-      _dtLogPush('log', `[key:capture] ${e.metaKey?'Cmd':'Ctrl'}+${e.key} defaultPrevented=${e.defaultPrevented}`);
+      const ae = document.activeElement;
+      const aeDesc = ae ? `${ae.tagName}#${ae.id || ''}` : 'none';
+      const isEditable = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
+      _dtLogPush('log', `[key:capture] ${e.metaKey?'Cmd':'Ctrl'}+${e.key} focus=${aeDesc} editable=${isEditable} defaultPrevented=${e.defaultPrevented}`);
       // schedule a microtask to log after handlers run
       Promise.resolve().then(() => {
         _dtLogPush('log', `[key:after] ${e.metaKey?'Cmd':'Ctrl'}+${e.key} defaultPrevented=${e.defaultPrevented}`);
@@ -8029,7 +8067,7 @@ function forceUpdate() {
 <script src="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack-all.js"></script>
 <div id="grid-view">
   <div class="grid-toolbar">
-    <span class="grid-toolbar-title">Grid</span>
+    <span class="grid-toolbar-title">Workspace</span>
     <div id="grid-chips"></div>
     <button class="btn" onclick="exitGridMode()" style="flex-shrink:0;font-size:0.75rem;padding:4px 10px;">&#x2715; Exit</button>
   </div>
