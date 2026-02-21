@@ -302,7 +302,7 @@
       cursor: zoom-out;
     }
     #demo-lightbox.open { display: flex; }
-    #demo-lightbox img {
+    #demo-lightbox video {
       display: block;
       width: 920px;
       max-width: 100%;
@@ -358,7 +358,7 @@
       <a class="btn" href="https://github.com/mixpeek/amux/blob/main/README.md" target="_blank" rel="noopener">
         Docs
       </a>
-      <button class="demo-btn" onclick="document.getElementById('demo-lightbox').classList.add('open')">
+      <button class="demo-btn">
         <!-- play icon -->
         <svg viewBox="0 0 16 16" fill="currentColor"><path d="M6 3.5l7 4.5-7 4.5V3.5z"/><rect x="1" y="1" width="2" height="14" rx="1"/></svg>
         Watch demo
@@ -367,13 +367,24 @@
   </div>
 
   <!-- ── Lightbox ───────────────────────────────────────── -->
-  <div id="demo-lightbox" onclick="this.classList.remove('open')">
-    <button id="demo-lightbox-close" onclick="document.getElementById('demo-lightbox').classList.remove('open')" aria-label="Close">&times;</button>
-    <img src="amux.gif" width="920" height="720" alt="amux walkthrough — session cards, peek mode, board, workspace" onclick="event.stopPropagation()">
+  <div id="demo-lightbox" onclick="closeLightbox()">
+    <button id="demo-lightbox-close" onclick="closeLightbox()" aria-label="Close">&times;</button>
+    <video id="demo-video" src="amux.mp4" width="920" loop muted playsinline controls onclick="event.stopPropagation()"></video>
   </div>
   <script>
+    var _lb = document.getElementById('demo-lightbox');
+    var _vid = document.getElementById('demo-video');
+    document.querySelector('.demo-btn').addEventListener('click', function() {
+      _lb.classList.add('open');
+      _vid.currentTime = 0;
+      _vid.play();
+    });
+    function closeLightbox() {
+      _lb.classList.remove('open');
+      _vid.pause();
+    }
     document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape') document.getElementById('demo-lightbox').classList.remove('open');
+      if (e.key === 'Escape') closeLightbox();
     });
   </script>
 
