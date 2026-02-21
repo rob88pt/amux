@@ -5591,34 +5591,42 @@ document.getElementById('peek-body').addEventListener('click', (e) => {
 document.addEventListener('mouseup', () => { peekCheckSelection(); });
 document.addEventListener('touchend', () => { peekCheckSelection(); });
 
-// Handle Ctrl+C as copy and Ctrl+V as paste in peek (Mac users may use Ctrl instead of Cmd)
+// ── Clipboard: copy/paste events (most reliable in Chrome PWA desktop) ──
+// The 'copy' and 'paste' DOM events give direct clipboardData access without
+// any permission prompt, and Chrome fires them for Cmd/Ctrl+C/V even in
+// standalone PWA mode where no native Edit menu exists.
+
+document.addEventListener('copy', function(e) {
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return;
+  const sel = window.getSelection()?.toString();
+  if (sel) { e.clipboardData.setData('text/plain', sel); e.preventDefault(); }
+});
+
+document.addEventListener('paste', function(e) {
+  const ae = document.activeElement;
+  if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return;
+  const text = e.clipboardData?.getData('text/plain');
+  if (!text) return;
+  const peekOpen = document.getElementById('peek-overlay')?.classList.contains('active');
+  const boardOpen = document.getElementById('board-detail-overlay')?.classList.contains('active');
+  const inp = peekOpen ? document.getElementById('peek-cmd-input')
+    : boardOpen ? document.querySelector('#board-detail-overlay textarea, #board-detail-overlay input')
+    : document.querySelector('.card.open .send-input') || document.getElementById('search');
+  if (!inp) return;
+  e.preventDefault();
+  const s = inp.selectionStart ?? inp.value.length;
+  const en = inp.selectionEnd ?? inp.value.length;
+  inp.value = inp.value.slice(0, s) + text + inp.value.slice(en);
+  inp.selectionStart = inp.selectionEnd = s + text.length;
+  inp.focus({ preventScroll: true });
+  inp.dispatchEvent(new Event('input', { bubbles: true }));
+});
+
+// Keydown: only handle V redirect (focus target so browser fires paste into it)
+// and app-level shortcuts (Escape, Cmd+S, etc.). Do NOT preventDefault for C/V —
+// that would block the copy/paste events above from firing.
 document.addEventListener('keydown', (e) => {
-  // ── Global clipboard handling ──
-  // Chrome PWA on macOS beeps when clipboard shortcuts hit non-editable elements.
-  // Handle Cmd/Ctrl+C and Cmd/Ctrl+V globally so the OS never sees unhandled clipboard keys.
-  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
-    const ae = document.activeElement;
-    const inInput = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
-    if (!inInput) {
-      if (e.key === 'c') {
-        e.preventDefault();
-        const sel = window.getSelection()?.toString();
-        if (sel) navigator.clipboard.writeText(sel).catch(() => {});
-        return;
-      }
-      if (e.key === 'v') {
-        // Focus the best available input — then DON'T preventDefault so the browser
-        // pastes natively into the newly focused element.
-        const peekOpen = document.getElementById('peek-overlay')?.classList.contains('active');
-        const boardOpen = document.getElementById('board-detail-overlay')?.classList.contains('active');
-        const inp = peekOpen ? document.getElementById('peek-cmd-input')
-          : boardOpen ? document.querySelector('#board-detail-overlay textarea, #board-detail-overlay input')
-          : document.querySelector('.card.open .send-input') || document.getElementById('search');
-        if (inp) inp.focus({ preventScroll: true });
-        return; // no preventDefault — browser pastes into now-focused element
-      }
-    }
-  }
   if (document.getElementById('grid-view').classList.contains('active')) {
     if (e.key === 'Escape') { e.preventDefault(); exitGridMode(); return; }
     return;
@@ -5628,29 +5636,22 @@ document.addEventListener('keydown', (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); boardDetailSave(); return; }
     return;
   }
-  if (!document.getElementById('peek-overlay').classList.contains('active')) return;
-  if (e.key === 'Escape') { e.preventDefault(); closePeek(); return; }
-  if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'c' || e.key === 'v')) {
-    const active = document.activeElement;
-    const isEditable = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
-    if (e.key === 'c') {
-      // In editable: browser handles copy natively
-      if (isEditable) return;
-      // Non-editable (terminal text): suppress OS beep, copy selection manually
-      e.preventDefault();
-      const sel = window.getSelection();
-      if (sel && sel.toString().length > 0) navigator.clipboard.writeText(sel.toString()).catch(() => {});
-    } else {
-      // Ctrl/Cmd-V: always let browser paste natively
-      // If focus is on the terminal (non-editable), redirect to send input first
-      // so the browser pastes there — no clipboard-read permission needed
-      if (!isEditable) {
-        const target = document.getElementById('peek-cmd-input');
-        if (target) target.focus();
-      }
-      // Don't preventDefault — browser handles the paste into whatever is now focused
+  // Cmd/Ctrl+V when not in an editable: focus best input so paste lands there
+  if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key === 'v') {
+    const ae = document.activeElement;
+    const inInput = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable);
+    if (!inInput) {
+      const peekOpen = document.getElementById('peek-overlay')?.classList.contains('active');
+      const boardOpen = document.getElementById('board-detail-overlay')?.classList.contains('active');
+      const inp = peekOpen ? document.getElementById('peek-cmd-input')
+        : boardOpen ? document.querySelector('#board-detail-overlay textarea, #board-detail-overlay input')
+        : document.querySelector('.card.open .send-input') || document.getElementById('search');
+      if (inp) inp.focus({ preventScroll: true });
+      // No preventDefault — browser fires paste event into the now-focused element
     }
   }
+  if (!document.getElementById('peek-overlay').classList.contains('active')) return;
+  if (e.key === 'Escape') { e.preventDefault(); closePeek(); return; }
 });
 
 // ═══════ LAYOUT MODES (list / grid) ═══════
