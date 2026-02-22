@@ -23,6 +23,15 @@
       "headers": {
         "Authorization": "Bearer ${MIXPEEK_API_KEY}"
       }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": [
+        "@playwright/mcp",
+        "--headless",
+        "--user-data-dir",
+        "${HOME}/.amux/playwright-auth/profile"
+      ]
     }
   }
 }
