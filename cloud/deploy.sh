@@ -51,9 +51,9 @@ PUBLIC_IP=$(terraform output -raw public_ip 2>/dev/null || true)
 ok "VM provisioned — public IP: $PUBLIC_IP"
 
 # ── Wait for Tailscale peer ──
-log "Waiting for amux-cloud to appear in Tailscale (up to 5 min)..."
+log "Waiting for amux-cloud to appear in Tailscale (up to 10 min)..."
 TS_HOST=""
-for i in $(seq 1 60); do
+for i in $(seq 1 120); do
   TS_HOST=$(tailscale status --json 2>/dev/null \
     | python3 -c "
 import sys, json
@@ -73,24 +73,31 @@ for peer in d.get('Peer', {}).values():
   sleep 5
 done
 echo
-[ -z "$TS_HOST" ] && err "amux-cloud did not appear in Tailscale after 5 min. Check GCP console logs."
+[ -z "$TS_HOST" ] && err "amux-cloud did not appear in Tailscale after 10 min. Check GCP console logs."
 
-# ── Deploy amux-server.py ──
-log "Deploying amux-server.py to $TS_HOST..."
-# Give SSH service a moment to start
+# ── Deploy amux-server.py via IAP ──
+log "Deploying amux-server.py via gcloud IAP..."
+PROJECT_ID=$(grep project_id terraform.tfvars | awk -F'"' '{print $2}')
+# Derive OS Login username: email with @ and . replaced by _
+IAP_USER=$(gcloud config get-value account 2>/dev/null | tr '@.' '_')
 sleep 5
-scp -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
+gcloud compute scp \
     "$AMUX_SERVER" \
-    "root@$TS_HOST:/opt/amux/amux-server.py"
+    "${IAP_USER}@amux-dev:/tmp/amux-server.py" \
+    --zone=us-central1-a --project="$PROJECT_ID" \
+    --tunnel-through-iap --quiet
+gcloud compute ssh "${IAP_USER}@amux-dev" \
+    --zone=us-central1-a --project="$PROJECT_ID" \
+    --tunnel-through-iap --quiet \
+    --command="sudo cp /tmp/amux-server.py /opt/amux/amux-server.py"
 ok "amux-server.py deployed"
 
-# ── Start amux service ──
+# ── Start amux service via IAP ──
 log "Starting amux service..."
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    "root@$TS_HOST" \
-    "systemctl start amux && sleep 3 && systemctl is-active amux"
+gcloud compute ssh "${IAP_USER}@amux-dev" \
+    --zone=us-central1-a --project="$PROJECT_ID" \
+    --tunnel-through-iap --quiet \
+    --command="sudo systemctl start amux && sleep 3 && sudo systemctl is-active amux"
 ok "amux service started"
 
 # ── Enable Tailscale Funnel for public iCal access ──
