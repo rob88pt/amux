@@ -1766,6 +1766,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .explore-icon { font-size: 1rem; flex-shrink: 0; line-height: 1; }
   .explore-name { font-size: 0.88rem; flex: 1; word-break: break-all; min-width: 0; }
   .explore-size { font-size: 0.72rem; color: var(--dim); flex-shrink: 0; }
+  .explore-mtime { font-size: 0.68rem; color: var(--dim); flex-shrink: 0; }
   .explore-menu-btn { flex-shrink: 0; background: none; border: none; color: var(--dim);
     cursor: pointer; font-size: 1rem; padding: 2px 6px; border-radius: 4px; line-height: 1;
     opacity: 0.4; transition: opacity 0.15s; }
@@ -5599,7 +5600,8 @@ async function loadExplore(path) {
       const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
       const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
       const menuBtn = `<button class="explore-menu-btn" title="Options" onclick="event.stopPropagation();_showExploreMenu('${entryPath.replace(/'/g,"\\'")}',this)">⋯</button>`;
-      row.innerHTML = `<span class="explore-icon">${icon}</span><span class="explore-name">${esc(displayName)}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>${menuBtn}`;
+      const mtime = entry.modified ? `<span class="explore-mtime">${timeAgo(entry.modified)}</span>` : '';
+      row.innerHTML = `<span class="explore-icon">${icon}</span><span class="explore-name">${esc(displayName)}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>${mtime}${menuBtn}`;
       if (entry.type === 'dir') {
         row.onclick = () => loadExplore(entryPath);
       } else {
