@@ -1981,7 +1981,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     font-size: 0.65rem; color: var(--yellow); font-weight: 600;
     pointer-events: none; white-space: nowrap;
   }
+  .log-search-btn { width: auto; padding: 0 8px; gap: 4px; font-size: 0.75rem; white-space: nowrap; }
+  .log-search-btn .log-search-icon { flex-shrink: 0; }
+  .log-search-btn .log-search-label { display: inline; }
   @media (max-width: 480px) {
+    .log-search-btn { width: 28px; padding: 0; }
+    .log-search-btn .log-search-label { display: none; }
     .search-input { min-width: 0; }
     .search-input:focus { }
     .header-row { gap: 4px; flex-wrap: nowrap; }
@@ -2879,7 +2884,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       oninput="searchQuery=this.value;document.getElementById('search-wrap').classList.toggle('has-value',!!this.value);onSearchInput()">
     <button class="search-clear" onclick="event.stopPropagation();clearSearch()">&#x2715;</button>
   </div>
-  <button id="log-search-btn" class="tile-btn" onclick="toggleLogSearch()" title="Search inside session logs" style="font-size:0.75rem;white-space:nowrap;padding:0 8px;">&#x1F50D; Logs</button>
+  <button id="log-search-btn" class="tile-btn log-search-btn" onclick="toggleLogSearch()" title="Search inside session logs">
+    <svg class="log-search-icon" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="8" y1="8" x2="14" y2="8"/><line x1="8" y1="14" x2="11" y2="14"/></svg>
+    <span class="log-search-label">Logs</span>
+  </button>
   <div class="tile-controls">
     <button class="tile-btn" id="tile-list-btn" onclick="setLayoutMode('list')" title="List view">&#x2630;</button>
     <button class="tile-btn" id="tile-group-btn" onclick="setLayoutMode('group')" title="Group by status" style="font-size:0.75rem;font-weight:700;">#</button>
@@ -5325,8 +5333,7 @@ function onSearchInput() {
 function toggleLogSearch() {
   logSearchMode = !logSearchMode;
   const btn = document.getElementById('log-search-btn');
-  btn.style.background = logSearchMode ? 'var(--accent)' : '';
-  btn.style.color = logSearchMode ? '#000' : '';
+  btn.classList.toggle('active', logSearchMode);
   document.getElementById('search-input').placeholder = logSearchMode
     ? 'Search session logs...' : 'Search sessions...';
   _logMatches = {};

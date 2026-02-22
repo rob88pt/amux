@@ -569,6 +569,69 @@ JSEOF
   esac
 }
 
+cmd_board() {
+  local AMUX_API="${AMUX_API:-https://localhost:8822}"
+  local subcmd="${1:-help}"; shift 2>/dev/null || true
+
+  case "$subcmd" in
+    done|doing|todo|backlog|discarded)
+      local status="$subcmd"
+      local id="${1:-}"; [[ -n "$id" ]] || die "Usage: amux board $status <ISSUE-ID>"
+      local result
+      result=$(curl -sk -X PATCH \
+        -H 'Content-Type: application/json' \
+        -d "{\"status\":\"$status\"}" \
+        "$AMUX_API/api/board/$id")
+      if echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['id'],'→',d['status'])" 2>/dev/null; then
+        :
+      else
+        echo "$result"
+      fi
+      ;;
+    status)
+      local id="${1:-}"; local new_status="${2:-}";
+      [[ -n "$id" && -n "$new_status" ]] || die "Usage: amux board status <ISSUE-ID> <status>"
+      local result
+      result=$(curl -sk -X PATCH \
+        -H 'Content-Type: application/json' \
+        -d "{\"status\":\"$new_status\"}" \
+        "$AMUX_API/api/board/$id")
+      echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['id'],'→',d['status'])" 2>/dev/null || echo "$result"
+      ;;
+    add|create)
+      local title="$*"; [[ -n "$title" ]] || die "Usage: amux board add <title>"
+      local result
+      result=$(curl -sk -X POST \
+        -H 'Content-Type: application/json' \
+        -d "{\"title\":\"$title\",\"status\":\"todo\"}" \
+        "$AMUX_API/api/board")
+      echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print('Created',d['id'],'→',d['title'])" 2>/dev/null || echo "$result"
+      ;;
+    ls|list)
+      curl -sk "$AMUX_API/api/board" | python3 -c "
+import sys,json
+items=json.load(sys.stdin)
+for i in sorted(items, key=lambda x: x.get('updated',0), reverse=True):
+    status_sym = {'done':'✓','doing':'▶','todo':'○','backlog':'·','discarded':'✗'}.get(i['status'],'?')
+    print(f\"{status_sym} {i['id']:12s} {i['title'][:60]} [{i['status']}]\")
+"
+      ;;
+    help|*)
+      cat <<EOF
+${BOLD}amux board${RESET} — manage board issues from the CLI
+
+  amux board ls                    List all issues
+  amux board add <title>           Create a new todo issue
+  amux board done <ID>             Move issue to done
+  amux board doing <ID>            Move issue to doing (in progress)
+  amux board todo <ID>             Move issue to todo
+  amux board backlog <ID>          Move issue to backlog
+  amux board status <ID> <status>  Set any status
+EOF
+      ;;
+  esac
+}
+
 cmd_serve() {
   local port="${1:-8822}"
   # Resolve cc-server.py relative to the real location of this script
@@ -611,6 +674,14 @@ ${BOLD}Dashboard:${RESET}
 
 ${BOLD}Web Dashboard:${RESET}
   amux serve [port]              Start web dashboard (default: 8822)
+
+${BOLD}Board:${RESET}
+  amux board ls                  List all board issues
+  amux board add <title>         Create a new issue
+  amux board done <ID>           Mark issue as done
+  amux board doing <ID>          Mark issue as in progress
+  amux board todo <ID>           Mark issue as todo
+  amux board status <ID> <s>     Set any status
 
 ${BOLD}Playwright Auth:${RESET}
   amux playwright-auth capture   Open browser to log into accounts (saves profile)
@@ -665,6 +736,7 @@ case "${1:-}" in
   start-all)        cmd_start_all ;;
   stop-all)         cmd_stop_all ;;
   serve|web)        shift; cmd_serve "$@" ;;
+  board|b)           shift; cmd_board "$@" ;;
   playwright-auth|pw-auth) shift; cmd_playwright_auth "$@" ;;
   help|--help|-h)   cmd_help ;;
   version|--version|-v) echo "amux v${CC_VERSION}" ;;
