@@ -2822,7 +2822,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .tab-bar::-webkit-scrollbar { display: none; }
   .tab-bar button {
-    flex: none; padding: 10px 12px; font-size: 0.85rem; font-weight: 600;
+    flex: none; padding: 10px 8px; font-size: 0.85rem; font-weight: 600;
     background: none; border: none; border-bottom: 2px solid transparent;
     color: var(--dim); cursor: pointer; transition: color 0.15s, border-color 0.15s;
     -webkit-tap-highlight-color: transparent; white-space: nowrap;
