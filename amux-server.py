@@ -95,6 +95,11 @@ _sse_cache = {
 }
 _SSE_CACHE_TTL = 2  # seconds
 
+# Auto-recovery state
+_sse_alerts: list = []           # ring buffer of alert dicts pushed to all SSE clients
+_sse_alert_lock = threading.Lock()
+_session_auto_actions: dict = {} # {name: {"last_compact": ts, "last_restart": ts}}
+
 # Per-session token cache — refreshed every 30s, keyed by resolved dir
 _token_cache = {"data": {}, "timestamps": {}, "time": 0}
 _TOKEN_CACHE_TTL = 30
@@ -347,17 +352,157 @@ def _yolo_loop():
             pass
 
 
+def _push_alert(alert_type: str, session: str, message: str):
+    """Enqueue an alert to be streamed to all SSE clients."""
+    global _sse_alerts
+    with _sse_alert_lock:
+        _sse_alerts.append({"type": alert_type, "session": session, "message": message, "ts": int(time.time())})
+        if len(_sse_alerts) > 50:
+            _sse_alerts = _sse_alerts[-50:]
+
+
+def _last_meaningful_user_message(work_dir: str) -> str:
+    """Extract the last meaningful user message (>20 chars) from the session's JSONL history."""
+    if not work_dir:
+        return ""
+    resolved = str(Path(work_dir).expanduser().resolve())
+    project_dir = CLAUDE_HOME / "projects" / resolved.replace("/", "-")
+    if not project_dir.is_dir():
+        return ""
+    jsonl_files = sorted(project_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+    if not jsonl_files:
+        return ""
+    last_msg = ""
+    try:
+        for line in jsonl_files[0].read_text(errors="replace").splitlines():
+            try:
+                entry = json.loads(line)
+                msg = entry.get("message", {})
+                if msg.get("role") == "user":
+                    content = msg.get("content", [])
+                    text = ""
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                text = block.get("text", "")
+                    elif isinstance(content, str):
+                        text = content
+                    if len(text) > 20:
+                        last_msg = text
+            except (json.JSONDecodeError, AttributeError):
+                continue
+    except Exception:
+        pass
+    return last_msg
+
+
+_STRIP_ANSI = re.compile(
+    r'\x1b\[[0-9;]*[a-zA-Z]|\x1b\]8;[^\x1b]*\x1b\\|\x1b\][^\x07]*\x07'
+    r'|\x1b\][^\x1b]*\x1b\\|\x1b[()][A-Z0-9]|\x1b[\x20-\x2f]*[\x40-\x7e]'
+)
+
+
 def _snapshot_all_sessions():
-    """Capture scrollback for all running sessions and save to disk."""
+    """Capture scrollback for all running sessions and save to disk.
+
+    Also runs health checks on each session's output:
+    1. Proactive: if context < 20% remaining before auto-compact, send /compact
+    2. Reactive: if thinking-block corruption error detected, restart conversation
+       and replay the last meaningful user message automatically.
+    3. Auto-continue: if CC_AUTO_CONTINUE=1 and session is stuck waiting for user
+       input for 2+ consecutive snapshots (~60s), auto-respond to unblock it.
+    """
     for f in CC_SESSIONS.glob("*.env"):
         name = f.stem
-        if is_running(name):
-            try:
-                output = tmux_capture(name, 5000)
-                if output:
-                    save_session_log(name, output)
-            except Exception:
-                pass
+        if not is_running(name):
+            continue
+        try:
+            output = tmux_capture(name, 5000)
+            if not output:
+                continue
+            save_session_log(name, output)
+
+            # Strip ANSI codes for pattern matching
+            clean = _STRIP_ANSI.sub("", output)
+            now = time.time()
+            actions = _session_auto_actions.setdefault(name, {})
+
+            # ── 1. Proactive: auto-compact when context is low ──────────────
+            ctx_match = re.search(r'context left until auto-compact[:\s]+(\d+)%', clean, re.IGNORECASE)
+            if ctx_match:
+                pct = int(ctx_match.group(1))
+                if pct < 20 and now - actions.get("last_compact", 0) > 300:
+                    actions["last_compact"] = now
+                    send_text(name, "/compact")
+                    _push_alert("auto_compact", name,
+                                f"Auto-compacted '{name}' — context was at {pct}%")
+
+            # ── 2. Reactive: thinking-block corruption → restart + replay ───
+            if ("redacted_thinking" in clean and
+                    "cannot be modified" in clean and
+                    now - actions.get("last_restart", 0) > 120):
+                actions["last_restart"] = now
+                wd = _session_work_dir(name)
+                last_msg = _last_meaningful_user_message(wd)
+                stop_session(name)
+                meta = _load_meta(name)
+                meta.pop("cc_conversation_id", None)
+                _save_meta(name, meta)
+                start_session(name)
+                if last_msg:
+                    def _replay(sname=name, msg=last_msg):
+                        time.sleep(6)
+                        send_text(sname, msg)
+                    threading.Thread(target=_replay, daemon=True).start()
+                _push_alert("thinking_reset", name,
+                            f"Session '{name}' auto-restarted: thinking block corruption"
+                            + (" — last message replayed" if last_msg else ""))
+
+            # ── 3. Auto-continue: unblock waiting sessions ───────────────────
+            status = _detect_claude_status(clean)
+            if status == "waiting":
+                if "ac_waiting_since" not in actions:
+                    # First snapshot seeing this session waiting — remember it
+                    actions["ac_waiting_since"] = now
+                else:
+                    # Still waiting on a subsequent snapshot — check opt-in flag
+                    cfg_ac = parse_env_file(f)
+                    if cfg_ac.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"):
+                        if now - actions.get("last_auto_continue", 0) > 300:
+                            # Determine what kind of waiting and what to send
+                            lines_ac = [l.strip() for l in clean.splitlines() if l.strip()]
+                            response = None
+                            label = ""
+                            for l in reversed(lines_ac[-15:]):
+                                sl = l.lower()
+                                if "enter to select" in sl:
+                                    response = ""   # bare Enter → select current option
+                                    label = "Enter (select option)"
+                                    break
+                                if re.match(r".*\u276f\s*\d+\.", l):  # ❯ 1. Yes selector
+                                    response = "1"
+                                    label = "1 (first option)"
+                                    break
+                                if "do you want to proceed" in sl:
+                                    response = "1"
+                                    label = "1 (proceed)"
+                                    break
+                                if "interrupted" in sl and "what should claude do" in sl:
+                                    custom = cfg_ac.get("CC_AUTO_CONTINUE_MSG", "continue")
+                                    response = custom
+                                    label = repr(custom)
+                                    break
+                            if response is not None:
+                                send_text(name, response)
+                                actions["last_auto_continue"] = now
+                                actions.pop("ac_waiting_since", None)
+                                _push_alert("auto_continue", name,
+                                            f"Auto-continued '{name}': sent {label}")
+            else:
+                # Session no longer waiting — reset tracking
+                actions.pop("ac_waiting_since", None)
+        except Exception:
+            pass
 
 
 def _snapshot_loop():
@@ -1318,6 +1463,7 @@ def list_sessions() -> list:
             "dir": resolved_dir,
             "desc": cfg.get("CC_DESC", ""),
             "pinned": cfg.get("CC_PINNED", "") == "1",
+            "auto_continue": cfg.get("CC_AUTO_CONTINUE") in ("1", "true", "yes"),
             "tags": [t.strip() for t in cfg.get("CC_TAGS", "").split(",") if t.strip()],
             "flags": cfg.get("CC_FLAGS", ""),
             "creator": cfg.get("CC_CREATOR", ""),
@@ -1974,6 +2120,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     font-weight: 600; text-transform: uppercase; white-space: nowrap; flex-shrink: 0;
   }
   .badge.yolo { background: rgba(210,153,34,0.2); color: var(--yellow); }
+  .badge.auto-continue { background: rgba(98,160,234,0.2); color: #62a0ea; }
   .badge.model { background: rgba(57,210,192,0.2); color: var(--cyan); }
 
   /* Expanded panel */
@@ -4340,6 +4487,7 @@ function render() {
     const isExp = expanded.has(s.name);
     const flags = s.flags || '';
     const isYolo = flags.includes('--dangerously-skip-permissions');
+  const isAutoContinue = !!s.auto_continue;
     const modelMatch = flags.match(/--model\s+(\S+)/);
     const flagModel = modelMatch ? modelMatch[1] : null;
     const model = flagModel || s.active_model || null;
@@ -4360,6 +4508,7 @@ function render() {
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','name','${esc(s.name)}')"><span class="mi">&#x270E;</span> Rename</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','model','${esc(model||"")}')"><span class="mi">&#x2699;</span> Model${model ? ': '+esc(model) : ''}</div>
           <div class="card-menu-item" onclick="event.stopPropagation();toggleYolo('${s.name}')"><span class="mi">${isYolo?'&#x2611;':'&#x2610;'}</span> YOLO mode</div>
+          <div class="card-menu-item" onclick="event.stopPropagation();toggleAutoContinue('${s.name}')" title="Auto-respond when Claude is waiting for user input (~60s delay)"><span class="mi">${isAutoContinue?'&#x2611;':'&#x2610;'}</span> Auto-continue</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','desc','${esc(s.desc||"")}')"><span class="mi">&#x1F4DD;</span> Description</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','tags','${esc(s.tags.join(", "))}')"><span class="mi">&#x1F3F7;</span> Tags</div>
           <div class="card-menu-item" onclick="event.stopPropagation();editField('${s.name}','dir','${esc(s.dir)}')"><span class="mi">&#x1F4C1;</span> Directory</div>
@@ -4393,8 +4542,9 @@ function render() {
           `<div class="card-log-hit" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}',hitIdx:${hi}})"><span class="log-hit-loc">${esc(s.name)}:${h.line}</span> <span class="log-hit-text">${esc(h.text.slice(0, 80))}</span></div>`
         ).join('') + (hits.length > 2 ? `<div class="card-log-hit" style="color:var(--dim);font-style:italic;" onclick="event.stopPropagation();openPeek('${s.name}',{query:'${sq}'})">+${hits.length - 2} more matches</div>` : '');
       })() : ''}
-      ${(isYolo || model || s.tags.length) ? `<div class="badges">
+      ${(isYolo || isAutoContinue || model || s.tags.length) ? `<div class="badges">
         ${isYolo ? '<span class="badge yolo">YOLO</span>' : ''}
+        ${isAutoContinue ? '<span class="badge auto-continue" title="Auto-continue enabled">AUTO</span>' : ''}
         ${model ? `<span class="badge model">${esc(model)}</span>` : ''}
         ${s.tags.map(t => `<span class="tag" data-tag="${esc(t)}" onclick="event.stopPropagation();toggleTagFilter('${esc(t)}')">${esc(t)}</span>`).join('')}
       </div>` : ''}
@@ -4984,6 +5134,15 @@ async function toggleYolo(session) {
   await apiCall(API + '/api/sessions/' + session + '/config', {
     method: 'PATCH', headers: {'Content-Type':'application/json'},
     body: JSON.stringify({ toggle_yolo: true })
+  });
+  await fetchSessions();
+}
+
+async function toggleAutoContinue(session) {
+  closeAllMenus();
+  await apiCall(API + '/api/sessions/' + session + '/config', {
+    method: 'PATCH', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ toggle_auto_continue: true })
   });
   await fetchSessions();
 }
@@ -10819,6 +10978,13 @@ class CCHandler(BaseHTTPRequestHandler):
                     cfg["CC_FLAGS"] = flags
                     _write_env(env_file, cfg)
                     return self._json({"ok": True, "message": "yolo toggled"})
+
+                # Toggle auto-continue
+                if body.get("toggle_auto_continue"):
+                    cur = cfg.get("CC_AUTO_CONTINUE", "0")
+                    cfg["CC_AUTO_CONTINUE"] = "0" if cur in ("1", "true", "yes") else "1"
+                    _write_env(env_file, cfg)
+                    return self._json({"ok": True, "message": "auto_continue toggled"})
 
                 # Change directory
                 if "dir" in body:
