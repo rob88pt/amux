@@ -2822,7 +2822,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .tab-bar::-webkit-scrollbar { display: none; }
   .tab-bar button {
-    flex: none; padding: 10px 10px; font-size: 0.85rem; font-weight: 600;
+    flex: none; padding: 10px 6px; font-size: 0.85rem; font-weight: 600;
     background: none; border: none; border-bottom: 2px solid transparent;
     color: var(--dim); cursor: pointer; transition: color 0.15s, border-color 0.15s;
     -webkit-tap-highlight-color: transparent; white-space: nowrap;
@@ -3478,6 +3478,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="field-group">
       <label class="field-label">Name</label>
       <input id="create-name" type="text" placeholder="my-project" autocomplete="off" autocorrect="off"
+        oninput="_createNameChanged(this.value)"
         onkeydown="if(event.key==='Enter'){event.preventDefault();document.getElementById('create-dir').focus({preventScroll:true});}">
     </div>
     <div class="field-group">
@@ -3492,6 +3493,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="field-group">
       <label class="field-label">Initial prompt <span class="field-optional">(optional)</span></label>
       <textarea id="create-prompt" rows="3" placeholder="What should Claude work on first?"></textarea>
+    </div>
+    <div class="field-group">
+      <label class="field-label" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+        <input type="checkbox" id="create-branch-enabled" onchange="_toggleCreateBranch(this.checked)" style="width:auto;margin:0;">
+        Git branch <span class="field-optional">(optional)</span>
+      </label>
+      <div id="create-branch-wrap" style="display:none;margin-top:8px;">
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input id="create-branch" type="text" placeholder="session/my-project" autocomplete="off" autocorrect="off" style="flex:1;">
+          <button class="btn" id="create-branch-suggest-btn" onclick="_suggestBranch()" title="Ask Claude to suggest branch names" style="flex-shrink:0;font-size:0.9rem;">✨</button>
+        </div>
+        <div id="create-branch-suggestions" style="display:none;flex-wrap:wrap;gap:6px;margin-top:8px;"></div>
+      </div>
     </div>
     <div class="edit-actions">
       <button class="btn" onclick="closeCreate()">Cancel</button>
@@ -10359,6 +10373,37 @@ class CCHandler(BaseHTTPRequestHandler):
             return self._json({"ok": True, "name": cc_name, "message": f"connected {tmux_session} as {cc_name}"})
 
         # POST /api/sessions (create new session)
+        if method == "POST" and path == "/api/suggest-branch":
+            body = self._read_body()
+            sname = body.get("name", "").strip()
+            dir_path = body.get("dir", "").strip()
+            prompt = body.get("prompt", "").strip()
+            slug = re.sub(r'[^a-z0-9-]', '-', sname.lower()).strip('-') or "session"
+            fallback = [f"session/{slug}", f"feat/{slug}", f"wip/{slug}", slug]
+            api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not api_key:
+                return self._json({"suggestions": fallback})
+            try:
+                import anthropic as _anthropic
+                client = _anthropic.Anthropic(api_key=api_key)
+                content = f"Suggest 4 git branch names for a coding session.\nSession name: {sname!r}"
+                if dir_path:
+                    content += f"\nProject directory: {dir_path!r}"
+                if prompt:
+                    content += f"\nGoal: {prompt!r}"
+                content += ("\n\nReply with exactly 4 branch names, one per line, no explanations, "
+                            "no bullets, no numbers. Use kebab-case. Vary the schema: one with "
+                            "'feat/', one with 'session/', one descriptive without prefix, one short.")
+                msg = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=120,
+                    messages=[{"role": "user", "content": content}],
+                )
+                lines = [l.strip() for l in msg.content[0].text.strip().splitlines() if l.strip()]
+                return self._json({"suggestions": lines[:4] if lines else fallback})
+            except Exception:
+                return self._json({"suggestions": fallback})
+
         if method == "POST" and path == "/api/sessions":
             body = self._read_body()
             name = body.get("name", "").strip()
