@@ -7000,7 +7000,15 @@ function _peekOpenLink(e) {
   if (href && /^https?:\/\//.test(href)) {
     e.preventDefault();
     e.stopPropagation();
-    window.open(href, '_blank', 'noopener,noreferrer');
+    // Use a synthetic <a> click — more reliable than window.open in desktop PWA
+    // standalone mode where window.open can be silently blocked by the popup blocker.
+    const tmp = document.createElement('a');
+    tmp.href = href;
+    tmp.target = '_blank';
+    tmp.rel = 'noopener noreferrer';
+    document.body.appendChild(tmp);
+    tmp.click();
+    document.body.removeChild(tmp);
   }
 }
 document.getElementById('peek-body').addEventListener('click', _peekOpenLink);
