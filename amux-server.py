@@ -2016,6 +2016,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   body.light .peek-highlight { color: #fff; }
   /* Ac section headers */
   body.light .ac-section { background: var(--bg); }
+  /* Workspace pane header + send area — hardcoded dark bg needs light override */
+  body.light .gp-header { background: var(--card); }
+  body.light .gp-send { background: var(--card); }
+  body.light .gp-close, body.light .gp-peek-btn { color: var(--dim); }
   html { font-size: 16px; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -6838,6 +6842,9 @@ async function submitCreate() {
     }
   }
   await fetchSessions();
+  // Scroll to the newly created session card
+  const newCard = document.querySelector('[data-session="' + CSS.escape(name) + '"]');
+  if (newCard) newCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 // ── Directory autocomplete + recent dirs ──
