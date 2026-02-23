@@ -1967,6 +1967,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     --green: #3fb950; --red: #f85149; --yellow: #d29922;
     --cyan: #39d2c0;
   }
+  body.light {
+    --bg: #ffffff; --card: #f6f8fa; --border: #d0d7de;
+    --text: #1f2328; --dim: #656d76; --accent: #0969da;
+    --green: #1a7f37; --red: #cf222e; --yellow: #9a6700;
+    --cyan: #0550ae;
+  }
+  body.light .board-sortable-ghost { background: rgba(9,105,218,0.08) !important; }
+  body.light .peek-body, body.light .gp-output { color-scheme: light; }
+  body.light .log-line { filter: none; }
   html { font-size: 16px; }
   body {
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -3357,6 +3366,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </button>
       <div class="active-dropdown" id="active-dropdown"></div>
     </div>
+    <button class="tile-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode" style="font-size:1rem;width:32px;height:32px;">🌙</button>
     <div class="header-add-wrap">
       <button class="header-add-btn" id="add-btn" onclick="event.stopPropagation();toggleAddMenu()">+</button>
       <div class="header-add-menu" id="add-menu">
@@ -3916,6 +3926,25 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <script>
+// ── Theme ──
+function _applyTheme(light) {
+  document.body.classList.toggle('light', light);
+  const btn = document.getElementById('theme-btn');
+  if (btn) btn.textContent = light ? '☀️' : '🌙';
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = light ? '#ffffff' : '#0d1117';
+}
+function toggleTheme() {
+  const isLight = document.body.classList.contains('light');
+  localStorage.setItem('amux_theme', isLight ? 'dark' : 'light');
+  _applyTheme(!isLight);
+}
+(function initTheme() {
+  const saved = localStorage.getItem('amux_theme');
+  const preferLight = saved ? saved === 'light' : window.matchMedia('(prefers-color-scheme: light)').matches;
+  _applyTheme(preferLight);
+})();
+
 // ═══════ STATE & GLOBALS ═══════
 const API = '';
 let sessions = [];
