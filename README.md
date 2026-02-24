@@ -95,7 +95,7 @@ Auto-generates TLS in order: Tailscale cert → mkcert → self-signed fallback.
 
 ### Trusting the certificate on your phone
 
-If you're using mkcert, your phone won't trust the CA by default. Serve it over HTTP so your phone can download and install it:
+The PWA uses a service worker for offline support — managing sessions, checking the board, and sending messages all work without a connection. For the service worker to register, your phone's browser must trust the HTTPS certificate. If you're using mkcert, your phone won't trust the CA by default. Serve it over HTTP so your phone can download and install it:
 
 ```bash
 python3 -c "
