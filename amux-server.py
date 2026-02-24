@@ -2205,7 +2205,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   body.light .peek-highlight { color: #fff; }
   /* Ac section headers */
   body.light .ac-section { background: var(--bg); }
-  /* Workspace pane header + send area — hardcoded dark bg needs light override */
+  /* Workspace overlay + pane header/send area — hardcoded dark bg needs light override */
+  body.light #grid-view { background: var(--bg); }
   body.light .gp-header { background: var(--card); }
   body.light .gp-send { background: var(--card); }
   body.light .gp-close, body.light .gp-peek-btn { color: var(--dim); }
@@ -5821,6 +5822,7 @@ function openPeek(name, opts) {
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   updateConnectionStatus();
   document.getElementById('peek-overlay').classList.add('active');
+  _syncPeekOverlayToVisualViewport();
   // Load cached peek instantly while fetching fresh data
   _idb.get('peek_' + name).then(cached => {
     if (cached && (!lastPeekHTML || lastPeekHTML.includes('Loading...'))) {
@@ -5860,9 +5862,35 @@ function closePeek() {
   peekSearchQuery = '';
   lastPeekHTML = '';
   clearPeekFiles();
-  document.getElementById('peek-overlay').classList.remove('active');
+  const ov = document.getElementById('peek-overlay');
+  ov.classList.remove('active');
+  ov.style.height = '';
+  ov.style.top = '';
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
 }
+
+// Keep peek overlay fitted to the visual viewport so it stays visible
+// when the user pinches to zoom or the on-screen keyboard appears.
+function _syncPeekOverlayToVisualViewport() {
+  const ov = document.getElementById('peek-overlay');
+  if (!window.visualViewport || !ov) return;
+  const vv = window.visualViewport;
+  ov.style.top = vv.offsetTop + 'px';
+  ov.style.height = vv.height + 'px';
+}
+(function() {
+  if (!window.visualViewport) return;
+  window.visualViewport.addEventListener('resize', () => {
+    if (document.getElementById('peek-overlay')?.classList.contains('active')) {
+      _syncPeekOverlayToVisualViewport();
+    }
+  });
+  window.visualViewport.addEventListener('scroll', () => {
+    if (document.getElementById('peek-overlay')?.classList.contains('active')) {
+      _syncPeekOverlayToVisualViewport();
+    }
+  });
+})();
 
 // Swipe right to close peek (but never when touching the terminal body — preserve text selection)
 (function() {
