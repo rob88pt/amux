@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>amux — Agent Multiplexer</title>
   <link rel="icon" href="icon.svg" type="image/svg+xml">
-  <meta name="description" content="Run, monitor, and orchestrate dozens of Claude Code sessions from your browser, phone, or terminal. Open source.">
+  <meta name="description" content="Run dozens of Claude Code agents unattended. Python 3 + tmux. Open source.">
   <meta property="og:title" content="amux — Agent Multiplexer">
-  <meta property="og:description" content="Run, monitor, and orchestrate dozens of Claude Code sessions from your browser, phone, or terminal. Open source.">
+  <meta property="og:description" content="Run dozens of Claude Code agents unattended. Python 3 + tmux. Open source.">
   <meta property="og:url" content="https://amux.io">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -23,7 +23,6 @@
       --code-bg: #111;
       --code-border: #1e1e1e;
       --accent: #4ade80;
-      --accent-dim: rgba(74, 222, 128, 0.08);
       --btn-bg: #1a1a1a;
       --btn-hover: #242424;
     }
@@ -37,7 +36,6 @@
         --code-bg: #f4f4f4;
         --code-border: #e0e0e0;
         --accent: #16a34a;
-        --accent-dim: rgba(22, 163, 74, 0.07);
         --btn-bg: #f0f0f0;
         --btn-hover: #e5e5e5;
       }
@@ -50,91 +48,65 @@
       font-size: 15px;
       line-height: 1.6;
       -webkit-font-smoothing: antialiased;
-      min-height: 100vh;
     }
 
     main {
-      max-width: 42rem;
+      max-width: 38rem;
       margin: 0 auto;
       padding: 5rem 1.5rem 6rem;
-    }
-
-    /* ── Hero ─────────────────────────────────────────────── */
-    .hero {
-      margin-bottom: 2.5rem;
     }
 
     .wordmark {
       display: flex;
       align-items: center;
       gap: 0.6rem;
-      margin-bottom: 1rem;
+      margin-bottom: 1.1rem;
     }
 
-    .wordmark-icon {
-      width: 36px;
-      height: 36px;
-      border-radius: 8px;
-      flex-shrink: 0;
-      overflow: hidden;
-    }
-
-    .wordmark-icon img {
-      width: 36px;
-      height: 36px;
+    .wordmark img {
+      width: 32px;
+      height: 32px;
+      border-radius: 7px;
       display: block;
     }
 
     .wordmark h1 {
-      font-size: 1.3rem;
+      font-size: 1.2rem;
       font-weight: 600;
       letter-spacing: -0.02em;
-      line-height: 1;
     }
 
-    .hero-tag {
-      font-size: 0.72rem;
-      font-weight: 500;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--accent);
-      margin-bottom: 0.9rem;
-    }
-
-    .hero-desc {
-      color: var(--fg);
+    .tagline {
       font-size: 1rem;
-      line-height: 1.65;
-      max-width: 36rem;
+      line-height: 1.6;
       margin-bottom: 1.6rem;
+      max-width: 32rem;
     }
 
-    .hero-desc strong {
-      color: var(--fg);
-      font-weight: 600;
-    }
+    .tagline strong { font-weight: 600; }
 
-    /* ── CTAs ─────────────────────────────────────────────── */
     .ctas {
       display: flex;
-      gap: 0.6rem;
+      gap: 0.5rem;
       flex-wrap: wrap;
+      margin-bottom: 2.5rem;
     }
 
     .btn {
       display: inline-flex;
       align-items: center;
       gap: 0.4rem;
-      padding: 0.45rem 0.95rem;
+      padding: 0.4rem 0.9rem;
       border-radius: 6px;
       font-size: 0.875rem;
       font-weight: 500;
       text-decoration: none;
-      cursor: pointer;
-      transition: background 0.15s, opacity 0.15s;
       border: 1px solid var(--border);
       background: var(--btn-bg);
       color: var(--fg);
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.12s, opacity 0.12s;
     }
 
     .btn:hover { background: var(--btn-hover); }
@@ -147,149 +119,61 @@
 
     .btn-primary:hover { opacity: 0.88; background: var(--accent); }
 
-    .btn svg { width: 14px; height: 14px; }
-
-    /* ── Install block ────────────────────────────────────── */
     .install-block {
-      margin: 2.2rem 0;
+      margin-bottom: 2.5rem;
       border: 1px solid var(--code-border);
       border-radius: 8px;
       overflow: hidden;
       background: var(--code-bg);
     }
 
-    .install-block-label {
-      padding: 0.5rem 1rem;
-      font-size: 0.7rem;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--muted);
-      border-bottom: 1px solid var(--code-border);
-    }
-
     .install-block pre {
-      padding: 1rem;
+      padding: 1rem 1.1rem;
       font-family: 'Geist Mono', ui-monospace, monospace;
       font-size: 0.8rem;
-      line-height: 1.75;
+      line-height: 1.8;
       overflow-x: auto;
     }
 
     .cmd-comment { color: var(--muted); }
     .cmd-dollar { color: var(--accent); user-select: none; }
 
-    /* ── OSS badge ────────────────────────────────────────── */
-    .oss-line {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      font-size: 0.8rem;
-      color: var(--muted);
-      margin-bottom: 2.2rem;
-    }
-
-    .oss-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--accent);
-      flex-shrink: 0;
-    }
-
-    .oss-line a {
-      color: var(--muted);
-      text-decoration: none;
-    }
-
-    .oss-line a:hover { color: var(--fg); }
-
-    /* ── Features ─────────────────────────────────────────── */
-    .section-label {
-      font-size: 0.7rem;
-      font-weight: 500;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 1.1rem;
-    }
-
     .features {
       list-style: none;
       display: flex;
       flex-direction: column;
-      gap: 0.85rem;
+      gap: 0.55rem;
       margin-bottom: 3rem;
     }
 
     .features li {
-      display: flex;
-      gap: 0.7rem;
       font-size: 0.9rem;
-      line-height: 1.55;
-    }
-
-    .feat-icon {
-      flex-shrink: 0;
-      width: 18px;
-      height: 18px;
-      margin-top: 0.05rem;
-      color: var(--accent);
+      color: var(--muted);
     }
 
     .features li strong {
       font-weight: 600;
+      color: var(--fg);
     }
 
-    .features li span {
-      color: var(--muted);
-    }
-
-    /* ── Divider ─────────────────────────────────────────── */
-    .divider {
+    hr {
       border: none;
       border-top: 1px solid var(--border);
-      margin: 2.5rem 0;
+      margin-bottom: 2rem;
     }
 
-    /* ── Footer ──────────────────────────────────────────── */
     footer {
       display: flex;
       flex-wrap: wrap;
       gap: 1rem;
-      align-items: center;
       font-size: 0.8rem;
       color: var(--muted);
     }
 
-    footer a {
-      color: var(--muted);
-      text-decoration: none;
-    }
-
+    footer a { color: var(--muted); text-decoration: none; }
     footer a:hover { color: var(--fg); }
-
     footer .sep { opacity: 0.3; }
 
-    /* ── Demo button ─────────────────────────────────────── */
-    .demo-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.45rem;
-      padding: 0.45rem 0.95rem;
-      border-radius: 6px;
-      font-size: 0.875rem;
-      font-weight: 500;
-      cursor: pointer;
-      transition: background 0.15s;
-      border: 1px solid var(--border);
-      background: var(--btn-bg);
-      color: var(--fg);
-      font-family: inherit;
-    }
-    .demo-btn:hover { background: var(--btn-hover); }
-    .demo-btn svg { width: 14px; height: 14px; flex-shrink: 0; }
-
-    /* ── Lightbox ────────────────────────────────────────── */
     #demo-lightbox {
       display: none;
       position: fixed;
@@ -303,7 +187,6 @@
     }
     #demo-lightbox.open { display: flex; }
     #demo-lightbox video {
-      display: block;
       width: 920px;
       max-width: 100%;
       height: auto;
@@ -329,149 +212,62 @@
 <body>
 <main>
 
-  <!-- ── Hero ─────────────────────────────────────────────── -->
-  <div class="hero">
-    <div class="wordmark">
-      <div class="wordmark-icon">
-        <img src="icon.svg" alt="amux icon">
-      </div>
-      <h1>amux</h1>
-    </div>
-
-    <p class="hero-tag">Agent Multiplexer</p>
-
-    <p class="hero-desc">
-      Run <strong>dozens of Claude Code agents unattended</strong>. amux watches every session on a 60s loop and handles what would otherwise interrupt you: context compaction, thinking-block recovery, tool-approval prompts. Agents coordinate via a shared REST API — no explicit programming required.
-    </p>
-
-    <div class="ctas">
-      <a class="btn btn-primary" href="https://github.com/mixpeek/amux#install">
-        <!-- download icon -->
-        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 12l-4.5-4.5 1.06-1.06L7 9.88V2h2v7.88l2.44-3.44 1.06 1.06L8 12z"/><path d="M2 13h12v1.5H2z"/></svg>
-        Install
-      </a>
-      <a class="btn" href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">
-        <!-- github icon -->
-        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-        GitHub
-      </a>
-      <a class="btn" href="https://github.com/mixpeek/amux/blob/main/README.md" target="_blank" rel="noopener">
-        Docs
-      </a>
-      <button class="demo-btn">
-        <!-- play icon -->
-        <svg viewBox="0 0 16 16" fill="currentColor"><path d="M6 3.5l7 4.5-7 4.5V3.5z"/><rect x="1" y="1" width="2" height="14" rx="1"/></svg>
-        Watch demo
-      </button>
-    </div>
+  <div class="wordmark">
+    <img src="icon.svg" alt="amux icon">
+    <h1>amux</h1>
   </div>
 
-  <!-- ── Lightbox ───────────────────────────────────────── -->
-  <div id="demo-lightbox" onclick="closeLightbox()">
-    <button id="demo-lightbox-close" onclick="closeLightbox()" aria-label="Close">&times;</button>
-    <video id="demo-video" src="amux.mp4" width="920" loop muted playsinline controls onclick="event.stopPropagation()"></video>
-  </div>
-  <script>
-    var _lb = document.getElementById('demo-lightbox');
-    var _vid = document.getElementById('demo-video');
-    document.querySelector('.demo-btn').addEventListener('click', function() {
-      _lb.classList.add('open');
-      _vid.currentTime = 0;
-      _vid.play();
-    });
-    function closeLightbox() {
-      _lb.classList.remove('open');
-      _vid.pause();
-    }
-    document.addEventListener('keydown', function(e) {
-      if (e.key === 'Escape') closeLightbox();
-    });
-  </script>
+  <p class="tagline">
+    Run <strong>dozens of Claude Code agents unattended</strong>.<br>
+    Python 3 + tmux. No build step, no external services.
+  </p>
 
-  <!-- ── OSS badge ──────────────────────────────────────── -->
-  <div class="oss-line">
-    <div class="oss-dot"></div>
-    Open source &nbsp;·&nbsp; MIT License &nbsp;·&nbsp;
-    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">github.com/mixpeek/amux</a>
+  <div class="ctas">
+    <a class="btn btn-primary" href="https://github.com/mixpeek/amux#install">Install</a>
+    <a class="btn" href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+    <a class="btn" href="https://github.com/mixpeek/amux/blob/main/README.md" target="_blank" rel="noopener">Docs</a>
+    <button class="btn" id="demo-btn">Watch demo</button>
   </div>
 
-  <!-- ── Install ────────────────────────────────────────── -->
   <div class="install-block">
-    <div class="install-block-label">Install &amp; quickstart</div>
     <pre><span class="cmd-dollar">$</span> git clone https://github.com/mixpeek/amux &amp;&amp; cd amux &amp;&amp; ./install.sh
-
-<span class="cmd-comment"># Register a project and start an agent</span>
-<span class="cmd-dollar">$</span> amux register api --dir ~/Dev/api --yolo
-<span class="cmd-dollar">$</span> amux start api
-
-<span class="cmd-comment"># Open the web dashboard (or install as a PWA on your phone)</span>
-<span class="cmd-dollar">$</span> amux serve
-<span class="cmd-comment">  → https://localhost:8822</span></pre>
+<span class="cmd-dollar">$</span> amux register api --dir ~/Dev/api --yolo &amp;&amp; amux start api
+<span class="cmd-dollar">$</span> amux serve  <span class="cmd-comment"># → https://localhost:8822</span></pre>
   </div>
 
-  <!-- ── Features ──────────────────────────────────────── -->
-  <p class="section-label">How it works</p>
   <ul class="features">
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Self-healing watchdog</strong> <span>— snapshots every session every 60s. Context low → <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">/compact</code>. Thinking-block corruption → restart + replay. Stuck waiting → auto-respond. All silent.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z"/>
-      </svg>
-      <div><strong>Truly headless YOLO mode</strong> <span>— <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">--dangerously-skip-permissions</code> still shows blocking tool-approval prompts. amux detects them via the "Esc to cancel" marker (never appears on open-ended questions) and auto-answers, keeping sessions actually unattended.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Agent coordination out of the box</strong> <span>— <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_SESSION</code> and <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_URL</code> are injected at startup. A global memory file (shared via REST) ships the full API reference — agents discover peers, peek output, and claim tasks without being told how.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>Atomic task claiming — no broker</strong> <span>— <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">POST /api/board/:id/claim</code> uses SQLite <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">UPDATE … RETURNING</code> as a CAS. Dozens of agents can race for the same queue with no Redis, no duplicated work.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zm0 6a1 1 0 011-1h5a1 1 0 011 1v6a1 1 0 01-1 1H3a1 1 0 01-1-1v-6zm9-1a1 1 0 00-1 1v6a1 1 0 001 1h5a1 1 0 001-1v-6a1 1 0 00-1-1h-5z"/>
-      </svg>
-      <div><strong>Web dashboard + PWA</strong> <span>— live session cards, peek mode, multi-pane workspace, kanban board with iCal sync. Installable on iOS/Android. Tailscale gives you real TLS and phone access with no config.</span></div>
-    </li>
-
-    <li>
-      <svg class="feat-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-        <path fill-rule="evenodd" d="M3 5a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2h-2.22l.123.489.804.804A1 1 0 0113 18H7a1 1 0 01-.707-1.707l.804-.804L7.22 15H5a2 2 0 01-2-2V5zm5.771 7H5V5h10v7H8.771z" clip-rule="evenodd"/>
-      </svg>
-      <div><strong>One Python file, zero build step</strong> <span>— ~12k lines: Python <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">ThreadingHTTPServer</code> + full dashboard as inline HTML/CSS/JS. Edit it; it restarts itself via <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">os.execv</code>. Only deps: <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">python3</code> and <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">tmux</code>.</span></div>
-    </li>
-
+    <li><strong>Self-healing watchdog</strong> — compacts, recovers from corruption, unblocks stuck sessions</li>
+    <li><strong>Truly headless YOLO</strong> — detects and auto-answers tool-approval prompts</li>
+    <li><strong>Agent coordination</strong> — <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">$AMUX_URL</code> injected at startup; agents discover peers and claim tasks</li>
+    <li><strong>Atomic task claiming</strong> — SQLite CAS, no Redis, no duplicates</li>
+    <li><strong>Dashboard + PWA</strong> — live output, kanban board, workspace. Phone-ready via Tailscale.</li>
+    <li><strong>One Python file</strong> — ~12k lines, self-restarts on save. Just <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">python3</code> + <code style="font-family:'Geist Mono',monospace;font-size:0.8em;">tmux</code>.</li>
   </ul>
 
-  <hr class="divider">
+  <hr>
 
-  <!-- ── Footer ─────────────────────────────────────────── -->
   <footer>
-    <span>amux</span>
+    <span>MIT License</span>
     <span class="sep">·</span>
-    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/mixpeek/amux" target="_blank" rel="noopener">github.com/mixpeek/amux</a>
     <span class="sep">·</span>
-    <a href="https://github.com/mixpeek/amux/blob/main/README.md" target="_blank" rel="noopener">Docs</a>
-    <span class="sep">·</span>
-    <a href="https://github.com/mixpeek/amux/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
-    <span class="sep">·</span>
-    <span style="color:var(--muted)">Built by <a href="https://mixpeek.com" target="_blank" rel="noopener">Mixpeek</a></span>
+    <span>Built by <a href="https://mixpeek.com" target="_blank" rel="noopener">Mixpeek</a></span>
   </footer>
 
 </main>
+
+<div id="demo-lightbox" onclick="closeLightbox()">
+  <button id="demo-lightbox-close" onclick="closeLightbox()" aria-label="Close">&times;</button>
+  <video id="demo-video" src="amux.mp4" width="920" loop muted playsinline controls onclick="event.stopPropagation()"></video>
+</div>
+<script>
+  var lb = document.getElementById('demo-lightbox');
+  var vid = document.getElementById('demo-video');
+  document.getElementById('demo-btn').addEventListener('click', function() {
+    lb.classList.add('open'); vid.currentTime = 0; vid.play();
+  });
+  function closeLightbox() { lb.classList.remove('open'); vid.pause(); }
+  document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeLightbox(); });
+</script>
 </body>
 </html>
