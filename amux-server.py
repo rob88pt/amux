@@ -5303,6 +5303,8 @@ function render() {
   if (openMenu || editState || document.getElementById('edit-overlay').classList.contains('active')) return;
   updatePeekStatus();
   const el = document.getElementById('cards');
+  // Save focused element before ANY DOM changes — captures search-input, send-input, or anything else
+  const focusedId = document.activeElement && document.activeElement.id ? document.activeElement.id : null;
   updateActiveCount();
   // Build tag filter bar
   const tagEl = document.getElementById('tag-filters');
@@ -5321,6 +5323,7 @@ function render() {
       el.innerHTML = '<div class="empty">No sessions yet.<br>Tap <strong>+</strong> to create one.' +
         (!online ? '<br><span style="color:var(--yellow)">You\'re offline — sessions created now will sync when connected.</span>' : '') + '</div>';
     }
+    if (focusedId) { const f = document.getElementById(focusedId); if (f) f.focus({ preventScroll: true }); }
     return;
   }
 
@@ -5355,15 +5358,14 @@ function render() {
   ) : list;
   if ((q || activeTag) && !filtered.length) {
     el.innerHTML = '<div class="empty">No matching sessions.</div>';
+    if (focusedId) { const f = document.getElementById(focusedId); if (f) f.focus({ preventScroll: true }); }
     return;
   }
-  // Save input values and focus before re-rendering
+  // Save input values before re-rendering (focusedId already captured at top)
   const savedInputs = {};
   el.querySelectorAll('.send-input').forEach(inp => {
     if (inp.value) savedInputs[inp.id] = inp.value;
   });
-  const focusedId = document.activeElement && document.activeElement.classList.contains('send-input')
-    ? document.activeElement.id : null;
 
   function _renderSessionCard(s) {
     const isExp = expanded.has(s.name);
