@@ -511,6 +511,31 @@ def _push_alert(alert_type: str, session: str, message: str):
             _sse_alerts = _sse_alerts[-50:]
 
 
+# ── Event log (persistent, streamed via SSE) ─────────────────────────
+_log_ring: list = []   # in-memory ring buffer for SSE push
+_log_ring_lock = threading.Lock()
+
+def _log_event(category: str, action: str, *, session: str = None,
+               actor: str = None, detail: str = None, level: str = "info"):
+    """Write an event to the logs table and push to SSE clients."""
+    ts = int(time.time())
+    try:
+        db = get_db()
+        db.execute(
+            "INSERT INTO logs (ts, category, action, session, actor, detail, level) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (ts, category, action, session, actor, detail, level))
+        db.commit()
+    except Exception:
+        pass
+    evt = {"ts": ts, "category": category, "action": action,
+           "session": session, "actor": actor, "detail": detail, "level": level}
+    with _log_ring_lock:
+        _log_ring.append(evt)
+        if len(_log_ring) > 100:
+            _log_ring[:] = _log_ring[-100:]
+
+
 def _last_meaningful_user_message(work_dir: str) -> str:
     """Extract the last meaningful user message (>20 chars) from the session's JSONL history."""
     if not work_dir:
@@ -878,6 +903,19 @@ CREATE TABLE IF NOT EXISTS prefs (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS logs (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts       INTEGER NOT NULL,
+    category TEXT NOT NULL DEFAULT 'system',
+    action   TEXT NOT NULL,
+    session  TEXT,
+    actor    TEXT,
+    detail   TEXT,
+    level    TEXT NOT NULL DEFAULT 'info'
+);
+CREATE INDEX IF NOT EXISTS idx_logs_ts       ON logs(ts);
+CREATE INDEX IF NOT EXISTS idx_logs_category ON logs(category);
+CREATE INDEX IF NOT EXISTS idx_logs_session  ON logs(session) WHERE session IS NOT NULL;
 """
 
 
@@ -11500,7 +11538,6 @@ class CCHandler(BaseHTTPRequestHandler):
             result = _rb_send({"action": "screenshot"})
             if not result.get("ok") or "data" not in result:
                 return self._json({"error": result.get("error", "no screenshot")}, 500)
-            import base64
             img_data = base64.b64decode(result["data"])
             self.send_response(200)
             self.send_header("Content-Type", "image/jpeg")
