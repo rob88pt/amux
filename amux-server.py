@@ -7213,7 +7213,7 @@ let _createBranchEdited = false;  // track if user manually changed branch name
 
 function openCreate() {
   document.getElementById('create-name').value = '';
-  document.getElementById('create-dir').value = '';
+  document.getElementById('create-dir').value = (_filesCwd && _filesCwd !== '/') ? _filesCwd : '';
   document.getElementById('create-prompt').value = '';
   document.getElementById('create-branch').value = '';
   document.getElementById('create-branch-enabled').checked = false;
@@ -11822,6 +11822,14 @@ class CCHandler(BaseHTTPRequestHandler):
             body = self._read_body()
             name = body.get("name", "").strip()
             dir_path = body.get("dir", "").strip()
+            # Fall back to saved files_cwd pref if no dir provided
+            if not dir_path:
+                try:
+                    row = get_db().execute("SELECT value FROM prefs WHERE key='files_cwd'").fetchone()
+                    if row and row["value"] and row["value"] != "/":
+                        dir_path = row["value"]
+                except Exception:
+                    pass
             if not name:
                 return self._json({"error": "missing name"}, 400)
             name = re.sub(r'[^a-zA-Z0-9_-]', '-', name)
