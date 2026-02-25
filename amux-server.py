@@ -2870,17 +2870,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .file-overlay-body.markdown strong { font-weight: 700; }
   .file-overlay-body.markdown em { font-style: italic; }
   .file-overlay-body.markdown hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
-  .file-overlay-body.markdown table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.84rem; overflow-x: auto; display: block; }
+  .file-overlay-body.markdown .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 12px 0; border-radius: 6px; border: 1px solid var(--border); }
+  .file-overlay-body.markdown table { border-collapse: collapse; min-width: 100%; margin: 0; font-size: 0.84rem; }
   .file-overlay-body.markdown thead { background: var(--card); }
   .file-overlay-body.markdown th { font-weight: 600; text-align: left; padding: 8px 12px; border: 1px solid var(--border); white-space: nowrap; }
   .file-overlay-body.markdown td { padding: 6px 12px; border: 1px solid var(--border); }
   .file-overlay-body.markdown tbody tr:nth-child(even) { background: rgba(88,166,255,0.04); }
   .file-overlay-body.markdown tbody tr:hover { background: rgba(88,166,255,0.08); }
+  @media (max-width: 600px) {
+    .file-overlay-body.markdown th, .file-overlay-body.markdown td { padding: 5px 8px; font-size: 0.78rem; }
+    .board-detail-preview th, .peek-memory-editor th, .board-detail-preview td, .peek-memory-editor td { padding: 4px 8px; font-size: 0.78rem; }
+  }
   .file-overlay-body.markdown img { max-width: 100%; border-radius: 6px; margin: 8px 0; }
   .file-overlay-body.markdown input[type="checkbox"] { margin-right: 6px; pointer-events: none; }
   .file-overlay-body.markdown del { color: var(--dim); }
   /* Board/memory markdown preview tables */
-  .board-detail-preview table, .peek-memory-editor table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 0.84rem; }
+  .board-detail-preview .table-scroll, .peek-memory-editor .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 10px 0; border-radius: 6px; border: 1px solid var(--border); }
+  .board-detail-preview table, .peek-memory-editor table { border-collapse: collapse; min-width: 100%; margin: 0; font-size: 0.84rem; }
   .board-detail-preview th, .peek-memory-editor th { font-weight: 600; text-align: left; padding: 6px 10px; border: 1px solid var(--border); background: var(--card); }
   .board-detail-preview td, .peek-memory-editor td { padding: 5px 10px; border: 1px solid var(--border); }
   .board-detail-preview tbody tr:nth-child(even), .peek-memory-editor tbody tr:nth-child(even) { background: rgba(88,166,255,0.04); }
@@ -9110,7 +9116,9 @@ function renderMarkdown(raw) {
   // Use marked.js for full GFM support (tables, task lists, strikethrough, etc.)
   if (typeof marked !== 'undefined') {
     try {
-      return marked.parse(raw, { gfm: true, breaks: true });
+      let html = marked.parse(raw, { gfm: true, breaks: true });
+      html = html.replace(/<table>/g, '<div class="table-scroll"><table>').replace(/<\/table>/g, '</table></div>');
+      return html;
     } catch(e) { /* fall through to basic renderer */ }
   }
   // Fallback: basic renderer if marked.js failed to load
