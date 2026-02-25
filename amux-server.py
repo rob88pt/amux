@@ -2500,8 +2500,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Peek overlay */
   .overlay {
-    position: fixed; top: 0; left: 0; right: 0;
-    height: 100%; height: 100dvh;
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
     background: var(--bg);
     z-index: 100; flex-direction: column;
   }
@@ -5932,12 +5931,20 @@ function closePeek() {
 
 // Keep peek overlay fitted to the visual viewport so it stays visible
 // when the user pinches to zoom or the on-screen keyboard appears.
+// Only apply inline sizing when visual viewport differs from layout viewport
+// (pinch zoom or virtual keyboard). Desktop browser zoom (Cmd+/-) keeps them
+// equal and is handled by CSS position:fixed + inset:0.
 function _syncPeekOverlayToVisualViewport() {
   const ov = document.getElementById('peek-overlay');
   if (!window.visualViewport || !ov) return;
   const vv = window.visualViewport;
-  ov.style.top = vv.offsetTop + 'px';
-  ov.style.height = vv.height + 'px';
+  if (vv.height < window.innerHeight - 1 || vv.offsetTop > 1) {
+    ov.style.height = vv.height + 'px';
+    ov.style.top = vv.offsetTop + 'px';
+  } else {
+    ov.style.height = '';
+    ov.style.top = '';
+  }
 }
 (function() {
   if (!window.visualViewport) return;
