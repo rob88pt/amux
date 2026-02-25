@@ -102,6 +102,154 @@ _send_locks: dict = {}          # per-session locks for serializing send_text/se
 _send_locks_lock = threading.Lock()  # protects _send_locks dict itself
 _session_auto_actions: dict = {} # {name: {"last_compact": ts, "last_restart": ts}}
 
+# ── Remote browser (screenshot-based Playwright child process) ──
+_rb_proc: subprocess.Popen | None = None
+_rb_lock = threading.Lock()
+
+_RB_AGENT_SCRIPT = r"""
+const { chromium } = require('PLAYWRIGHT_PATH');
+const { homedir } = require('os');
+const readline = require('readline');
+
+let ctx = null, page = null;
+const PROFILE = homedir() + '/.amux/playwright-auth/profile';
+
+const rl = readline.createInterface({ input: process.stdin, terminal: false });
+rl.on('line', async (line) => {
+  let cmd;
+  try { cmd = JSON.parse(line); } catch(e) { respond({ok:false,error:'bad json'}); return; }
+  try {
+    switch (cmd.action) {
+      case 'start': {
+        if (ctx) { try { await ctx.close(); } catch(e) {} }
+        ctx = await chromium.launchPersistentContext(PROFILE, {
+          headless: true,
+          viewport: { width: 1280, height: 800 },
+          ignoreHTTPSErrors: true,
+          args: ['--no-first-run', '--disable-blink-features=AutomationControlled'],
+        });
+        page = ctx.pages()[0] || await ctx.newPage();
+        if (cmd.url) {
+          await page.goto(cmd.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+        }
+        respond({ ok: true, url: page.url(), title: await page.title() });
+        break;
+      }
+      case 'navigate': {
+        if (!page) { respond({ok:false,error:'no page'}); break; }
+        await page.goto(cmd.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+        await page.waitForTimeout(300);
+        respond({ ok: true, url: page.url(), title: await page.title() });
+        break;
+      }
+      case 'click': {
+        if (!page) { respond({ok:false,error:'no page'}); break; }
+        await page.mouse.click(cmd.x, cmd.y, { button: cmd.button || 'left' });
+        await page.waitForTimeout(500);
+        respond({ ok: true, url: page.url(), title: await page.title() });
+        break;
+      }
+      case 'type': {
+        if (!page) { respond({ok:false,error:'no page'}); break; }
+        await page.keyboard.type(cmd.text, { delay: 30 });
+        await page.waitForTimeout(200);
+        respond({ ok: true });
+        break;
+      }
+      case 'key': {
+        if (!page) { respond({ok:false,error:'no page'}); break; }
+        await page.keyboard.press(cmd.key);
+        await page.waitForTimeout(200);
+        respond({ ok: true });
+        break;
+      }
+      case 'scroll': {
+        if (!page) { respond({ok:false,error:'no page'}); break; }
+        await page.mouse.wheel(0, cmd.dy || 300);
+        await page.waitForTimeout(200);
+        respond({ ok: true });
+        break;
+      }
+      case 'back': {
+        if (!page) { respond({ok:false,error:'no page'}); break; }
+        await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(()=>{});
+        await page.waitForTimeout(300);
+        respond({ ok: true, url: page.url(), title: await page.title() });
+        break;
+      }
+      case 'forward': {
+        if (!page) { respond({ok:false,error:'no page'}); break; }
+        await page.goForward({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(()=>{});
+        await page.waitForTimeout(300);
+        respond({ ok: true, url: page.url(), title: await page.title() });
+        break;
+      }
+      case 'reload': {
+        if (!page) { respond({ok:false,error:'no page'}); break; }
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
+        await page.waitForTimeout(300);
+        respond({ ok: true, url: page.url(), title: await page.title() });
+        break;
+      }
+      case 'screenshot': {
+        if (!page) { respond({ok:false,error:'no page'}); break; }
+        const buf = await page.screenshot({ type: 'jpeg', quality: 70 });
+        respond({ ok: true, data: buf.toString('base64'), url: page.url(), title: await page.title() });
+        break;
+      }
+      case 'stop': {
+        if (ctx) { try { await ctx.close(); } catch(e) {} ctx = null; page = null; }
+        respond({ ok: true });
+        process.exit(0);
+        break;
+      }
+      default:
+        respond({ ok: false, error: 'unknown action: ' + cmd.action });
+    }
+  } catch(e) {
+    respond({ ok: false, error: e.message });
+  }
+});
+
+function respond(obj) {
+  process.stdout.write(JSON.stringify(obj) + '\n');
+}
+process.on('SIGTERM', () => { if (ctx) ctx.close().finally(() => process.exit(0)); });
+"""
+
+def _rb_send(cmd: dict, timeout: float = 20.0) -> dict:
+    """Send a command to the remote browser child process and return the JSON response."""
+    global _rb_proc
+    with _rb_lock:
+        if _rb_proc is None or _rb_proc.poll() is not None:
+            if cmd.get("action") != "start":
+                return {"ok": False, "error": "browser not running"}
+            # Start the child process
+            pw_path = str(Path(__file__).resolve().parent / "node_modules" / "playwright")
+            script = _RB_AGENT_SCRIPT.replace("PLAYWRIGHT_PATH", pw_path.replace("\\", "/"))
+            _rb_proc = subprocess.Popen(
+                ["node", "-e", script],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1,
+            )
+        proc = _rb_proc
+        try:
+            proc.stdin.write(json.dumps(cmd) + "\n")
+            proc.stdin.flush()
+            # Read one line of response (with timeout)
+            import select
+            ready, _, _ = select.select([proc.stdout], [], [], timeout)
+            if not ready:
+                return {"ok": False, "error": "timeout"}
+            line = proc.stdout.readline()
+            if not line:
+                _rb_proc = None
+                return {"ok": False, "error": "process exited"}
+            return json.loads(line)
+        except Exception as e:
+            _rb_proc = None
+            return {"ok": False, "error": str(e)}
+
 # Per-session token cache — refreshed every 30s, keyed by resolved dir
 _token_cache = {"data": {}, "timestamps": {}, "time": 0}
 _TOKEN_CACHE_TTL = 30
@@ -3775,6 +3923,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-reports" onclick="switchView('reports')">Reports</button>
   <button id="tab-notifications" onclick="switchView('notifications')" style="display:none;">Notifications</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
+  <button id="tab-browser" onclick="switchView('browser')">Browser</button>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
 </div>
 <div id="session-view">
@@ -3892,6 +4041,39 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="btn" id="files-hidden-btn" onclick="toggleFilesHidden()" style="font-size:0.7rem;padding:2px 8px;" title="Show hidden files">.*</button>
   </div>
   <div id="files-body" style="flex:1;overflow-y:auto;padding:0;"></div>
+</div>
+
+<div id="browser-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
+  <!-- URL bar -->
+  <div style="padding:6px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <button class="btn" onclick="_rbCmd('back')" style="font-size:0.8rem;padding:2px 6px;" title="Back">&#x25C0;</button>
+    <button class="btn" onclick="_rbCmd('forward')" style="font-size:0.8rem;padding:2px 6px;" title="Forward">&#x25B6;</button>
+    <button class="btn" onclick="_rbCmd('reload')" style="font-size:0.8rem;padding:2px 6px;" title="Reload">&#x21BB;</button>
+    <input id="rb-url" type="text" placeholder="https://example.com" autocomplete="off"
+      style="flex:1;font-size:0.8rem;font-family:monospace;padding:5px 8px;"
+      onkeydown="if(event.key==='Enter'){_rbNavigate(this.value);}">
+    <button class="btn" onclick="_rbNavigate(document.getElementById('rb-url').value)" style="font-size:0.75rem;padding:3px 10px;">Go</button>
+    <span id="rb-status" style="font-size:0.7rem;color:var(--dim);min-width:50px;text-align:right;"></span>
+  </div>
+  <!-- Viewport -->
+  <div id="rb-viewport-wrap" style="flex:1;min-height:0;overflow:hidden;position:relative;background:#1a1a2e;display:flex;align-items:center;justify-content:center;">
+    <div id="rb-placeholder" style="color:var(--dim);font-size:0.9rem;text-align:center;padding:40px;">
+      <div style="font-size:2rem;margin-bottom:12px;">&#x1F310;</div>
+      <div>Remote Browser</div>
+      <div style="font-size:0.75rem;margin-top:8px;">Enter a URL above or</div>
+      <button class="btn primary" onclick="_rbStart()" style="margin-top:12px;font-size:0.8rem;padding:6px 16px;">Launch Browser</button>
+    </div>
+    <img id="rb-screen" style="display:none;max-width:100%;max-height:100%;cursor:crosshair;image-rendering:auto;user-select:none;-webkit-user-select:none;"
+      onclick="_rbClick(event)" oncontextmenu="event.preventDefault();_rbClick(event,true)">
+  </div>
+  <!-- Input bar -->
+  <div style="padding:6px 12px;display:flex;align-items:center;gap:6px;border-top:1px solid var(--border);flex-shrink:0;">
+    <input id="rb-type-input" type="text" placeholder="Type text and press Enter to send keystrokes..."
+      style="flex:1;font-size:0.8rem;padding:5px 8px;"
+      onkeydown="_rbTypeKey(event)">
+    <button class="btn" onclick="_rbCmd('screenshot')" style="font-size:0.7rem;padding:3px 8px;" title="Refresh screenshot">&#x1F4F7;</button>
+    <button class="btn" onclick="_rbStop()" style="font-size:0.7rem;padding:3px 8px;color:var(--red);" title="Close browser">&#x2716;</button>
+  </div>
 </div>
 
 <!-- Schedule modal -->
@@ -6869,6 +7051,151 @@ function closeFilePreview() {
   _fileData = null;
 }
 
+// ═══════ REMOTE BROWSER ═══════
+let _rbActive = false;
+let _rbLoading = false;
+
+async function _rbStart(url) {
+  const status = document.getElementById('rb-status');
+  status.textContent = 'Starting...';
+  _rbLoading = true;
+  try {
+    const r = await fetch(API + '/api/browser/start', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ url: url || '' }),
+    });
+    const d = await r.json();
+    if (!d.ok) { status.textContent = d.error || 'Failed'; _rbLoading = false; return; }
+    _rbActive = true;
+    status.textContent = '';
+    document.getElementById('rb-placeholder').style.display = 'none';
+    document.getElementById('rb-screen').style.display = 'block';
+    await _rbRefresh();
+  } catch(e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+  _rbLoading = false;
+}
+
+async function _rbStop() {
+  try { await fetch(API + '/api/browser/stop', { method: 'POST' }); } catch(e) {}
+  _rbActive = false;
+  document.getElementById('rb-screen').style.display = 'none';
+  document.getElementById('rb-screen').src = '';
+  document.getElementById('rb-placeholder').style.display = '';
+  document.getElementById('rb-url').value = '';
+  document.getElementById('rb-status').textContent = '';
+}
+
+async function _rbRefresh() {
+  if (!_rbActive) return;
+  const img = document.getElementById('rb-screen');
+  const status = document.getElementById('rb-status');
+  try {
+    const r = await fetch(API + '/api/browser/screenshot?t=' + Date.now());
+    if (!r.ok) { status.textContent = 'Screenshot failed'; return; }
+    const blob = await r.blob();
+    const old = img.src;
+    img.src = URL.createObjectURL(blob);
+    if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
+    // Update URL bar with current page URL
+    const info = r.headers.get('X-Page-Url');
+    if (info) document.getElementById('rb-url').value = info;
+    const title = r.headers.get('X-Page-Title');
+    if (title) status.textContent = decodeURIComponent(title);
+  } catch(e) {
+    status.textContent = 'Offline';
+  }
+}
+
+async function _rbNavigate(url) {
+  if (!url) return;
+  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+  document.getElementById('rb-url').value = url;
+  if (!_rbActive) { await _rbStart(url); return; }
+  const status = document.getElementById('rb-status');
+  status.textContent = 'Loading...';
+  try {
+    const r = await fetch(API + '/api/browser/navigate', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ url }),
+    });
+    const d = await r.json();
+    if (d.url) document.getElementById('rb-url').value = d.url;
+    if (d.title) status.textContent = d.title;
+  } catch(e) { status.textContent = 'Error'; }
+  await _rbRefresh();
+}
+
+async function _rbCmd(action) {
+  if (!_rbActive) return;
+  const status = document.getElementById('rb-status');
+  try {
+    await fetch(API + '/api/browser/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ action }),
+    });
+  } catch(e) {}
+  await _rbRefresh();
+}
+
+function _rbClick(event, rightClick) {
+  if (!_rbActive) return;
+  const img = event.target;
+  const rect = img.getBoundingClientRect();
+  // Scale click coordinates from displayed size to actual viewport size (1280x800)
+  const scaleX = img.naturalWidth / rect.width;
+  const scaleY = img.naturalHeight / rect.height;
+  const x = Math.round((event.clientX - rect.left) * scaleX);
+  const y = Math.round((event.clientY - rect.top) * scaleY);
+  const status = document.getElementById('rb-status');
+  status.textContent = 'Click ' + x + ',' + y + '...';
+  fetch(API + '/api/browser/action', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ action: 'click', x, y, button: rightClick ? 'right' : 'left' }),
+  }).then(() => _rbRefresh()).catch(() => { status.textContent = 'Error'; });
+}
+
+function _rbTypeKey(event) {
+  if (!_rbActive) return;
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    const input = event.target;
+    const text = input.value;
+    input.value = '';
+    if (!text) {
+      // Just press Enter
+      fetch(API + '/api/browser/action', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ action: 'key', key: 'Enter' }),
+      }).then(() => _rbRefresh());
+      return;
+    }
+    // Type text then press Enter
+    fetch(API + '/api/browser/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ action: 'type', text }),
+    }).then(() => _rbRefresh());
+  } else if (event.key === 'Escape') {
+    fetch(API + '/api/browser/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ action: 'key', key: 'Escape' }),
+    }).then(() => _rbRefresh());
+  } else if (event.key === 'Tab') {
+    event.preventDefault();
+    fetch(API + '/api/browser/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ action: 'key', key: 'Tab' }),
+    }).then(() => _rbRefresh());
+  } else if (event.key === 'Backspace' && !event.target.value) {
+    // If input is empty, forward backspace to remote browser
+    fetch(API + '/api/browser/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ action: 'key', key: 'Backspace' }),
+    }).then(() => _rbRefresh());
+  }
+}
+
 // ═══════ FILE EXPLORER ═══════
 let _explorePath = '';
 let _exploreShowHidden = false;
@@ -8083,12 +8410,14 @@ function switchView(view) {
   document.getElementById('reports-view').style.display = view === 'reports' ? '' : 'none';
   document.getElementById('notifications-view').style.display = view === 'notifications' ? '' : 'none';
   document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
+  document.getElementById('browser-view').style.display = view === 'browser' ? 'flex' : 'none';
   document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
   document.getElementById('tab-board').classList.toggle('active', view === 'board');
   document.getElementById('tab-calendar').classList.toggle('active', view === 'calendar');
   document.getElementById('tab-reports').classList.toggle('active', view === 'reports');
   document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
   document.getElementById('tab-files').classList.toggle('active', view === 'files');
+  document.getElementById('tab-browser').classList.toggle('active', view === 'browser');
   if (view === 'files') loadFiles(_filesPath);
   if (view === 'reports') fetchReports();
   if (view === 'board') {
@@ -11133,6 +11462,45 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "output": output}, 500)
             except Exception as e:
                 return self._json({"ok": False, "output": str(e)}, 500)
+
+        # ── Remote browser endpoints ──
+        if method == "POST" and path == "/api/browser/start":
+            body = self._read_body()
+            result = _rb_send({"action": "start", "url": body.get("url", "")})
+            return self._json(result, 200 if result.get("ok") else 500)
+
+        if method == "POST" and path == "/api/browser/stop":
+            result = _rb_send({"action": "stop"})
+            return self._json({"ok": True})
+
+        if method == "POST" and path == "/api/browser/navigate":
+            body = self._read_body()
+            result = _rb_send({"action": "navigate", "url": body.get("url", "")})
+            return self._json(result, 200 if result.get("ok") else 500)
+
+        if method == "POST" and path == "/api/browser/action":
+            body = self._read_body()
+            result = _rb_send(body)
+            return self._json(result, 200 if result.get("ok") else 500)
+
+        if method == "GET" and path == "/api/browser/screenshot":
+            result = _rb_send({"action": "screenshot"})
+            if not result.get("ok") or "data" not in result:
+                return self._json({"error": result.get("error", "no screenshot")}, 500)
+            import base64
+            img_data = base64.b64decode(result["data"])
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(img_data)))
+            self.send_header("Cache-Control", "no-store")
+            if result.get("url"):
+                self.send_header("X-Page-Url", result["url"])
+            if result.get("title"):
+                from urllib.parse import quote
+                self.send_header("X-Page-Title", quote(result["title"]))
+            self.end_headers()
+            self.wfile.write(img_data)
+            return
 
         # GET /api/stats/daily
         if method == "GET" and path == "/api/stats/daily":
