@@ -5412,10 +5412,14 @@ function _updateNotifBtn() {
 
 async function toggleNotifications() {
   if (!_notifsEnabled) {
+    if (Notification.permission === 'denied') {
+      showToast('Blocked — go to browser Site Settings and allow Notifications for this site');
+      return;
+    }
     const perm = Notification.permission === 'granted'
       ? 'granted'
       : await Notification.requestPermission();
-    if (perm !== 'granted') { showToast('Notification permission denied'); return; }
+    if (perm !== 'granted') { showToast('Notification permission not granted'); return; }
     _notifsEnabled = true;
     localStorage.setItem('amux_notifs', '1');
     showToast('Session notifications enabled');
