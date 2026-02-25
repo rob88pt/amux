@@ -10520,7 +10520,17 @@ function switchServer(idx) {
     servers: allServers,
     deviceName: localStorage.getItem('amux_device_name') || ''
   }));
-  location.href = s.url + '/?_sync=' + encodeURIComponent(payload);
+  const url = s.url + '/?_sync=' + encodeURIComponent(payload);
+  // Use <a> element click — more reliable than location.href in PWA standalone mode
+  // (location.href to a different origin is silently ignored on some iOS PWA builds)
+  const isPWA = navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
+  const a = document.createElement('a');
+  a.href = url;
+  if (isPWA) a.target = '_blank'; // opens in-app browser on iOS PWA
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 // ═══════ SETTINGS DROPDOWN ═══════
