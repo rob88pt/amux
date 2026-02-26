@@ -4358,6 +4358,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="btn" id="files-home-btn" onclick="loadFiles(_filesCwd)" style="font-size:0.7rem;padding:2px 8px;" title="Go to working directory">&#x1F3E0;</button>
     <button class="btn" id="files-setcwd-btn" onclick="setFilesCwd()" style="font-size:0.7rem;padding:2px 8px;" title="Set current directory as working directory">&#x1F4CC; Set CWD</button>
     <button class="btn" id="files-hidden-btn" onclick="toggleFilesHidden()" style="font-size:0.7rem;padding:2px 8px;" title="Show hidden files">.*</button>
+    <button class="btn" id="files-cache-btn" onclick="cacheFilesDir(_filesPath)" style="font-size:0.7rem;padding:2px 8px;" title="Cache directory for offline viewing">&#x2601; Cache</button>
+    <span id="files-cache-status" style="font-size:0.7rem;color:var(--dim);white-space:nowrap;"></span>
   </div>
   <div id="files-body" style="flex:1;overflow-y:auto;padding:0;"></div>
 </div>
@@ -7502,7 +7504,22 @@ async function openFilePreview(path) {
       document.getElementById('file-view-tabs').style.display = '';
     }
     _renderFileBody(data, _fileViewMode);
+    // Update cache
+    _idb.setFile(path, { type: 'file', data });
   } catch(e) {
+    // Offline: try IDB cache
+    const cached = await _idb.getFile(path);
+    if (cached && cached.type === 'file') {
+      _fileData = cached.data;
+      const age = Math.round((Date.now() - cached.ts) / 60000);
+      const ageStr = age < 60 ? age + 'm ago' : Math.round(age/60) + 'h ago';
+      document.getElementById('file-title').textContent = path.split('/').pop() + ' \u2022 cached ' + ageStr;
+      if (!cached.data.is_image && !cached.data.is_pdf) {
+        document.getElementById('file-view-tabs').style.display = '';
+      }
+      _renderFileBody(cached.data, _fileViewMode);
+      return;
+    }
     document.getElementById('file-body').textContent = 'Failed to load file.';
   }
 }
@@ -7777,37 +7794,111 @@ async function loadFiles(path) {
     const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(path) + (_filesShowHidden ? '&hidden=1' : ''));
     const data = await r.json();
     if (data.error) { body.innerHTML = '<div style="padding:16px;color:var(--dim)">' + esc(data.error) + '</div>'; return; }
-    body.innerHTML = '';
-    if (data.parent && data.parent !== data.path) {
-      const back = document.createElement('div');
-      back.className = 'explore-row';
-      back.innerHTML = '<span class="explore-icon">&#x2B05;</span><span class="explore-name" style="color:var(--dim)">.. (up)</span>';
-      back.onclick = () => loadFiles(data.parent);
-      body.appendChild(back);
-    }
-    if (!data.entries.length) {
-      body.innerHTML += '<div style="padding:16px;color:var(--dim)">Empty directory</div>';
-      return;
-    }
-    for (const entry of data.entries) {
-      const row = document.createElement('div');
-      row.className = 'explore-row';
-      const icon = entry.type === 'dir' ? '&#x1F4C2;' : '&#x1F4C4;';
-      const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
-      const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
-      const menuBtn = '<button class="explore-menu-btn" title="Options" onclick="event.stopPropagation();_showExploreMenu(\'' + entryPath.replace(/'/g, "\\'") + '\',this)">⋯</button>';
-      const mtime = entry.modified ? '<span class="explore-mtime">' + timeAgo(entry.modified) + '</span>' : '';
-      row.innerHTML = '<span class="explore-icon">' + icon + '</span><span class="explore-name">' + esc(displayName) + '</span><span class="explore-size">' + esc(_fmtSize(entry.size)) + '</span>' + mtime + menuBtn;
-      if (entry.type === 'dir') {
-        row.onclick = () => loadFiles(entryPath);
-      } else {
-        row.onclick = () => openFilePreview(entryPath);
-      }
-      body.appendChild(row);
-    }
+    _renderFilesEntries(body, path, data, false);
   } catch(e) {
-    body.innerHTML = '<div style="padding:16px;color:var(--dim)">Failed to load directory.</div>';
+    // Offline: try IDB cache
+    const cached = await _idb.getFile(path);
+    if (cached && cached.type === 'dir') {
+      _renderFilesEntries(body, path, cached.data, cached.ts);
+    } else {
+      body.innerHTML = '<div style="padding:16px;color:var(--dim)">Failed to load directory.</div>';
+    }
   }
+}
+function _renderFilesEntries(body, path, data, cacheTs) {
+  body.innerHTML = '';
+  if (cacheTs) {
+    const age = Math.round((Date.now() - cacheTs) / 60000);
+    const ageStr = age < 60 ? age + 'm ago' : Math.round(age/60) + 'h ago';
+    body.innerHTML = '<div style="padding:4px 12px;font-size:0.7rem;color:var(--dim);background:var(--card);border-bottom:1px solid var(--border);">&#x1F4F5; Offline cache &middot; ' + ageStr + '</div>';
+  }
+  if (data.parent && data.parent !== data.path) {
+    const back = document.createElement('div');
+    back.className = 'explore-row';
+    back.innerHTML = '<span class="explore-icon">&#x2B05;</span><span class="explore-name" style="color:var(--dim)">.. (up)</span>';
+    back.onclick = () => loadFiles(data.parent);
+    body.appendChild(back);
+  }
+  if (!data.entries.length) {
+    body.innerHTML += '<div style="padding:16px;color:var(--dim)">Empty directory</div>';
+    return;
+  }
+  for (const entry of data.entries) {
+    const row = document.createElement('div');
+    row.className = 'explore-row';
+    const icon = entry.type === 'dir' ? '&#x1F4C2;' : '&#x1F4C4;';
+    const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
+    const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
+    const menuBtn = '<button class="explore-menu-btn" title="Options" onclick="event.stopPropagation();_showExploreMenu(\'' + entryPath.replace(/'/g, "\\'") + '\',this)">⋯</button>';
+    const mtime = entry.modified ? '<span class="explore-mtime">' + timeAgo(entry.modified) + '</span>' : '';
+    row.innerHTML = '<span class="explore-icon">' + icon + '</span><span class="explore-name">' + esc(displayName) + '</span><span class="explore-size">' + esc(_fmtSize(entry.size)) + '</span>' + mtime + menuBtn;
+    if (entry.type === 'dir') {
+      row.onclick = () => loadFiles(entryPath);
+    } else {
+      row.onclick = () => openFilePreview(entryPath);
+    }
+    body.appendChild(row);
+  }
+}
+
+// ═══════ OFFLINE FILE CACHE ═══════
+const _CACHEABLE_TEXT_EXTS = new Set([
+  '.md','.markdown','.mdx','.txt','.py','.js','.ts','.jsx','.tsx','.mjs','.cjs',
+  '.html','.htm','.css','.json','.yaml','.yml','.toml','.sh','.bash','.zsh',
+  '.env','.gitignore','.gitattributes','.go','.rs','.java','.rb','.php','.swift',
+  '.kt','.c','.cpp','.h','.cs','.sql','.graphql','.proto','.tf','.xml','.csv',
+  '.ini','.cfg','.conf','.lock','.mod','.sum','.dockerfile','.makefile',
+]);
+const _CACHEABLE_IMG_EXTS = new Set(['.png','.jpg','.jpeg','.gif','.webp','.svg','.bmp','.ico']);
+const _SKIP_CACHE_DIRS = new Set(['.git','node_modules','__pycache__','.next','.nuxt','dist','build','.venv','venv','.tox','.mypy_cache','target','vendor']);
+
+async function cacheFilesDir(rootPath, maxDepth = 2) {
+  const statusEl = document.getElementById('files-cache-status');
+  const btn = document.getElementById('files-cache-btn');
+  let count = 0;
+  const setStatus = msg => { if (statusEl) statusEl.textContent = msg; };
+  setStatus('Scanning\u2026');
+  if (btn) { btn.disabled = true; btn.textContent = '\u23F3 Caching'; }
+
+  async function walkDir(path, depth) {
+    try {
+      const r = await fetch(API + '/api/ls?path=' + encodeURIComponent(path));
+      if (!r.ok) return;
+      const data = await r.json();
+      if (data.error) return;
+      await _idb.setFile(path, { type: 'dir', data });
+      count++;
+      setStatus('Cached ' + count + ' items\u2026');
+      for (const entry of (data.entries || [])) {
+        const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
+        if (entry.type === 'dir') {
+          if (depth < maxDepth && !_SKIP_CACHE_DIRS.has(entry.name)) {
+            await walkDir(entryPath, depth + 1);
+          }
+        } else {
+          const dot = entry.name.lastIndexOf('.');
+          const ext = dot >= 0 ? entry.name.slice(dot).toLowerCase() : '';
+          const isImg = _CACHEABLE_IMG_EXTS.has(ext);
+          const isText = _CACHEABLE_TEXT_EXTS.has(ext) || (!ext && (entry.size || 0) < 50000);
+          if (!isText && !isImg) continue;
+          if (isImg && (entry.size || 0) > 200000) continue;
+          if (!isImg && (entry.size || 0) > 200000) continue;
+          try {
+            const fr = await fetch(API + '/api/file?path=' + encodeURIComponent(entryPath));
+            if (fr.ok) {
+              const fd = await fr.json();
+              if (!fd.error) { await _idb.setFile(entryPath, { type: 'file', data: fd }); count++; setStatus('Cached ' + count + ' items\u2026'); }
+            }
+          } catch(e) {}
+        }
+      }
+    } catch(e) {}
+  }
+
+  await walkDir(rootPath, 0);
+  if (btn) { btn.disabled = false; btn.textContent = '\u2601 Cache'; }
+  setStatus('\u2713 ' + count + ' cached');
+  setTimeout(() => setStatus(''), 5000);
 }
 
 function openExplore(startPath) {
@@ -10766,7 +10857,7 @@ const _idb = (() => {
   let db = null;
   const open = () => new Promise((resolve, reject) => {
     if (db) return resolve(db);
-    const req = indexedDB.open('amux', 2);
+    const req = indexedDB.open('amux', 3);
     req.onupgradeneeded = () => {
       const d = req.result;
       if (!d.objectStoreNames.contains('kv')) d.createObjectStore('kv');
@@ -10778,6 +10869,9 @@ const _idb = (() => {
       }
       if (!d.objectStoreNames.contains('statuses')) {
         d.createObjectStore('statuses', { keyPath: 'id' });
+      }
+      if (!d.objectStoreNames.contains('files')) {
+        d.createObjectStore('files', { keyPath: 'path' });
       }
     };
     req.onsuccess = () => { db = req.result; resolve(db); };
@@ -10814,6 +10908,18 @@ const _idb = (() => {
       req.onsuccess = () => resolve(req.result || []);
       req.onerror = () => resolve([]);
     })).catch(() => []),
+    // Files offline cache
+    setFile: (path, val) => open().then(d => {
+      const tx = d.transaction('files', 'readwrite');
+      tx.objectStore('files').put({ ...val, path, ts: Date.now() });
+    }).catch(() => {}),
+    getFile: (path) => open().then(d => new Promise((resolve) => {
+      const tx = d.transaction('files', 'readonly');
+      const req = tx.objectStore('files').get(path);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    })).catch(() => null),
+    clearFiles: () => _txw('files', os => os.clear()),
   };
 })();
 
