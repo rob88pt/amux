@@ -11480,7 +11480,7 @@ function renderServerList() {
     const isCurrent = s.url.replace(/\/+$/, '') === current;
     if (isCurrent) return;  // skip — already shown above
     const syncUrl = s.url + '/?_sync=' + encodeURIComponent(payload);
-    html += '<a style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;margin-bottom:4px;cursor:pointer;transition:background 0.12s;text-decoration:none;color:inherit;" href="' + esc(syncUrl) + '"' + (isPWA ? ' target="_blank"' : '') + '>';
+    html += '<a style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-radius:6px;margin-bottom:4px;cursor:pointer;transition:background 0.12s;text-decoration:none;color:inherit;" href="' + esc(syncUrl) + '" onclick="_switchServerUrl(' + i + ',event);">';
     html += '<div style="min-width:0;flex:1;">';
     html += '<div style="font-size:0.75rem;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.name || s.url) + '</div>';
     if (s.name) html += '<div style="font-size:0.65rem;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(s.url.replace(/^https?:\/\//, '')) + '</div>';
@@ -11536,6 +11536,30 @@ function removeServer(idx) {
   _saveServers(servers);
   renderServerList();
   if (typeof renderSettingsServerList === 'function') renderSettingsServerList();
+}
+
+// Called from server list <a> onclick — handles PWA cross-origin navigation
+function _switchServerUrl(idx, evt) {
+  evt && evt.preventDefault();
+  const servers = _getSavedServers();
+  const s = servers[idx];
+  if (!s) return;
+  const currentOrigin = location.origin;
+  const allServers = [...servers];
+  if (!allServers.some(srv => srv.url.replace(/\/+$/, '') === currentOrigin)) {
+    allServers.push({ name: location.host, url: currentOrigin });
+  }
+  const payload = btoa(JSON.stringify({
+    servers: allServers,
+    deviceName: localStorage.getItem('amux_device_name') || ''
+  }));
+  const url = s.url.replace(/\/+$/, '') + '/?_sync=' + encodeURIComponent(payload);
+  const isPWA = navigator.standalone || window.matchMedia('(display-mode: standalone)').matches;
+  if (isPWA) {
+    window.open(url, '_blank');
+  } else {
+    location.href = url;
+  }
 }
 
 function switchServer(idx) {
