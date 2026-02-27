@@ -12888,6 +12888,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 ]
                 multipart = b"\r\n".join(parts)
                 import urllib.request as _urq
+                import urllib.error as _urqe
                 req = _urq.Request(
                     "https://api.openai.com/v1/audio/transcriptions",
                     data=multipart,
@@ -12906,7 +12907,7 @@ class CCHandler(BaseHTTPRequestHandler):
                     with _urq.urlopen(req, timeout=30, context=_ssl_ctx) as r:
                         result = json.loads(r.read())
                     return self._json({"text": result.get("text", "")})
-                except _urq.error.HTTPError as e:
+                except _urqe.HTTPError as e:
                     try:
                         err_body = json.loads(e.read().decode("utf-8", errors="replace"))
                         err_msg = err_body.get("error", {}).get("message", str(e))
