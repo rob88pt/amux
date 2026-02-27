@@ -4903,6 +4903,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="file-view-tabs" id="file-view-tabs" style="display:none;">
       <button class="file-view-tab active" id="file-tab-preview" onclick="setFileViewMode('preview')">Preview</button>
       <button class="file-view-tab" id="file-tab-raw" onclick="setFileViewMode('raw')">Raw</button>
+      <button class="file-view-tab" id="file-tab-copy" onclick="copyFileContent()" title="Copy to clipboard">Copy</button>
     </div>
     <button class="btn" onclick="closeFilePreview()" style="flex-shrink:0;">&#x2715;</button>
   </div>
@@ -7639,6 +7640,14 @@ async function openFilePreview(path) {
 function closeFilePreview() {
   document.getElementById('file-overlay').classList.remove('active');
   _fileData = null;
+}
+
+async function copyFileContent() {
+  if (!_fileData || !_fileData.content) return;
+  await navigator.clipboard.writeText(_fileData.content);
+  const btn = document.getElementById('file-tab-copy');
+  btn.textContent = 'Copied!';
+  setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
 }
 
 // ═══════ REMOTE BROWSER ═══════
