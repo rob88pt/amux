@@ -185,6 +185,144 @@ _rb_last_video: str | None = None  # path to last recorded video (mp4 or webm)
 _RB_PROFILES_DIR = CC_HOME / "playwright-auth" / "profiles"
 _RB_VIDEOS_DIR = CC_HOME / "browser-videos"
 
+# ── Browser agent state ──
+_rb_agent_state: dict = {
+    "running": False, "task": "", "step": 0, "total_steps": 0,
+    "action": "", "done": False, "error": None, "video_ready": False,
+}
+_rb_agent_lock = threading.Lock()
+
+def _rb_agent_update(**kwargs):
+    with _rb_agent_lock:
+        _rb_agent_state.update(kwargs)
+
+def _run_browser_agent(task: str, start_url: str = "", max_steps: int = 25):
+    """Drive the browser with Claude tool-use, record everything, produce MP4."""
+    global _rb_last_video
+    import anthropic
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        _rb_agent_update(running=False, error="ANTHROPIC_API_KEY not set", action="Error")
+        return
+
+    client = anthropic.Anthropic(api_key=api_key)
+    tools = [
+        {"name": "navigate", "description": "Navigate to a URL.",
+         "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
+        {"name": "click", "description": "Click at pixel coordinates (x, y). The viewport is 1280×800.",
+         "input_schema": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}}, "required": ["x", "y"]}},
+        {"name": "type", "description": "Type text into the currently focused element.",
+         "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
+        {"name": "key", "description": "Press a keyboard key, e.g. Enter, Tab, Escape, ArrowDown.",
+         "input_schema": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}},
+        {"name": "scroll", "description": "Scroll the page. dy > 0 scrolls down.",
+         "input_schema": {"type": "object", "properties": {"dy": {"type": "number"}}, "required": ["dy"]}},
+        {"name": "wait", "description": "Pause for ms milliseconds while content loads (max 5000).",
+         "input_schema": {"type": "object", "properties": {"ms": {"type": "number"}}, "required": ["ms"]}},
+        {"name": "done", "description": "Task complete — stop the browser and save the recording.",
+         "input_schema": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}},
+    ]
+
+    _rb_agent_update(action="Starting browser…", total_steps=max_steps)
+    start_cmd: dict = {"action": "start", "url": start_url or "about:blank", "record": True}
+    with _rb_agent_lock:
+        prof = _rb_agent_state.get("_profile", _rb_profile)
+    if prof and prof != "default":
+        start_cmd["profile"] = prof
+    result = _rb_send(start_cmd, timeout=30.0)
+    if not result.get("ok"):
+        _rb_agent_update(running=False, error=result.get("error", "Browser start failed"))
+        return
+
+    messages: list = []
+    try:
+        for step in range(max_steps):
+            with _rb_agent_lock:
+                if not _rb_agent_state["running"]:
+                    break
+
+            _rb_agent_update(step=step + 1, action=f"Step {step+1}/{max_steps} — screenshot")
+            ss = _rb_send({"action": "screenshot"}, timeout=15.0)
+            if not ss.get("ok"):
+                time.sleep(1)
+                continue
+
+            _rb_agent_update(action=f"Step {step+1}/{max_steps} — thinking…")
+            messages.append({"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": ss["data"]}},
+                {"type": "text", "text":
+                    f"URL: {ss.get('url','')}\nTitle: {ss.get('title','')}\n\n"
+                    f"Task: {task}\n\n"
+                    f"Step {step+1} of up to {max_steps}. "
+                    "Continue working on the task. Call done() when finished."},
+            ]})
+
+            response = client.messages.create(
+                model="claude-sonnet-4-6", max_tokens=1024,
+                tools=tools, messages=messages,
+            )
+            messages.append({"role": "assistant", "content": response.content})
+
+            tool_results = []
+            done = False
+            for block in response.content:
+                if block.type != "tool_use":
+                    continue
+                name, inp, bid = block.name, block.input, block.id
+                label = f"{name}({', '.join(f'{k}={repr(v)}' for k,v in inp.items())})"
+                _rb_agent_update(action=f"Step {step+1} — {label}")
+
+                if name == "done":
+                    done = True
+                    tool_results.append({"type": "tool_result", "tool_use_id": bid, "content": "Done."})
+                    break
+                elif name == "navigate":
+                    r = _rb_send({"action": "navigate", "url": inp["url"]}, timeout=20.0)
+                elif name == "click":
+                    r = _rb_send({"action": "click", "x": inp["x"], "y": inp["y"]})
+                elif name == "type":
+                    r = _rb_send({"action": "type", "text": inp["text"]})
+                elif name == "key":
+                    r = _rb_send({"action": "key", "key": inp["key"]})
+                elif name == "scroll":
+                    r = _rb_send({"action": "scroll", "dy": inp["dy"]})
+                elif name == "wait":
+                    time.sleep(min(float(inp.get("ms", 1000)), 5000) / 1000)
+                    r = {"ok": True}
+                else:
+                    r = {"ok": False, "error": f"unknown tool: {name}"}
+                tool_results.append({"type": "tool_result", "tool_use_id": bid, "content": json.dumps(r)})
+
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
+            if done or response.stop_reason == "end_turn":
+                break
+
+    except Exception as e:
+        _rb_agent_update(error=str(e))
+    finally:
+        _rb_agent_update(action="Converting video…")
+        stop_result = _rb_send({"action": "stop"}, timeout=30.0)
+        _rb_last_video = None
+        webm = stop_result.get("videoPath")
+        if webm and os.path.exists(webm):
+            mp4 = webm.rsplit(".", 1)[0] + ".mp4"
+            try:
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", webm, "-c:v", "libx264",
+                     "-preset", "fast", "-crf", "22", "-pix_fmt", "yuv420p", mp4],
+                    capture_output=True, timeout=120,
+                )
+                _rb_last_video = mp4 if os.path.exists(mp4) else webm
+            except Exception:
+                _rb_last_video = webm
+        video_ready = bool(_rb_last_video)
+        _rb_agent_update(
+            running=False, done=True, video_ready=video_ready,
+            action="Video ready — click Download." if video_ready else "Done (no video).",
+        )
+
 _RB_AGENT_SCRIPT = r"""
 const { chromium } = require('PLAYWRIGHT_PATH');
 const { homedir } = require('os');
@@ -4451,6 +4589,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="btn" onclick="_rbNavigate(document.getElementById('rb-url').value)" style="font-size:0.75rem;padding:3px 10px;">Go</button>
     <span id="rb-status" style="font-size:0.7rem;color:var(--dim);min-width:50px;text-align:right;"></span>
   </div>
+  <!-- Agent bar -->
+  <div style="padding:5px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);flex-shrink:0;background:color-mix(in srgb,var(--card-bg) 60%,transparent);">
+    <span style="font-size:0.65rem;color:var(--dim);white-space:nowrap;">&#x1F916; Agent:</span>
+    <input id="rb-agent-input" type="text" placeholder='e.g. "search YouTube for lo-fi music and play the first result"'
+      style="flex:1;font-size:0.72rem;padding:3px 8px;"
+      onkeydown="if(event.key==='Enter')_rbRunAgent()">
+    <button class="btn primary" id="rb-agent-run" onclick="_rbRunAgent()" style="font-size:0.68rem;padding:3px 10px;white-space:nowrap;">&#x25B6; Run</button>
+    <button class="btn" id="rb-agent-stop" onclick="_rbStopAgent()" style="font-size:0.68rem;padding:3px 8px;color:var(--red);display:none;">&#x23F9; Stop</button>
+    <span id="rb-agent-status" style="font-size:0.65rem;color:var(--dim);white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis;"></span>
+  </div>
   <!-- Viewport -->
   <div id="rb-viewport-wrap" style="flex:1;min-height:0;overflow:hidden;position:relative;background:#1a1a2e;display:flex;align-items:center;justify-content:center;">
     <div id="rb-placeholder" style="color:var(--dim);font-size:0.9rem;text-align:center;padding:40px;">
@@ -7859,6 +8007,86 @@ async function _rbLoginDone() {
   const ps = document.getElementById('rb-profile-status');
   ps.textContent = 'Credentials saved for ' + _rbCurrentProfile;
   setTimeout(() => { if (ps.textContent.startsWith('Credentials')) ps.textContent = ''; }, 3000);
+}
+
+// ── Browser agent ──
+let _rbAgentRunning = false;
+let _rbAgentPollTimer = null;
+
+async function _rbRunAgent() {
+  const input = document.getElementById('rb-agent-input');
+  const task = input.value.trim();
+  if (!task) { input.focus(); return; }
+  if (_rbAgentRunning) return;
+
+  // Stop any active manual browser first
+  if (_rbActive) await _rbStop();
+
+  _rbAgentRunning = true;
+  document.getElementById('rb-agent-run').style.display = 'none';
+  document.getElementById('rb-agent-stop').style.display = '';
+  document.getElementById('rb-agent-status').textContent = 'Starting…';
+  document.getElementById('rb-video-banner').style.display = 'none';
+  document.getElementById('rb-placeholder').style.display = 'none';
+  document.getElementById('rb-screen').style.display = 'block';
+
+  try {
+    const body = { task };
+    if (_rbCurrentProfile && _rbCurrentProfile !== 'default') body.profile = _rbCurrentProfile;
+    const r = await fetch(API + '/api/browser/agent', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (!d.ok) { _rbAgentDone(d.error || 'Failed to start'); return; }
+    // Start polling
+    _rbAgentPollTimer = setInterval(_rbPollAgent, 1500);
+  } catch(e) {
+    _rbAgentDone('Error: ' + e.message);
+  }
+}
+
+async function _rbPollAgent() {
+  try {
+    const r = await fetch(API + '/api/browser/agent/status');
+    const d = await r.json();
+    document.getElementById('rb-agent-status').textContent = d.action || '';
+    // Refresh screenshot while agent is doing things
+    if (d.running) {
+      await _rbRefresh().catch(() => {});
+    }
+    if (!d.running) {
+      clearInterval(_rbAgentPollTimer);
+      _rbAgentPollTimer = null;
+      // Final screenshot
+      await _rbRefresh().catch(() => {});
+      if (d.video_ready) {
+        const banner = document.getElementById('rb-video-banner');
+        document.getElementById('rb-video-link').href = API + '/api/browser/video?t=' + Date.now();
+        banner.style.display = 'flex';
+      }
+      _rbAgentDone(d.error || (d.video_ready ? 'Done — video ready' : 'Done'));
+    }
+  } catch(e) {}
+}
+
+function _rbAgentDone(msg) {
+  _rbAgentRunning = false;
+  document.getElementById('rb-agent-run').style.display = '';
+  document.getElementById('rb-agent-stop').style.display = 'none';
+  document.getElementById('rb-agent-status').textContent = msg || '';
+  // Browser is already stopped by server — reset local state
+  _rbActive = false;
+}
+
+async function _rbStopAgent() {
+  try { await fetch(API + '/api/browser/agent/stop', { method: 'POST' }); } catch(e) {}
+  clearInterval(_rbAgentPollTimer);
+  _rbAgentPollTimer = null;
+  _rbAgentDone('Stopped');
+  document.getElementById('rb-placeholder').style.display = '';
+  document.getElementById('rb-screen').style.display = 'none';
+  document.getElementById('rb-screen').src = '';
 }
 
 async function _rbRefresh() {
@@ -12868,6 +13096,37 @@ class CCHandler(BaseHTTPRequestHandler):
                 except Exception:
                     _rb_last_video = webm
             return self._json({"ok": True, "videoReady": bool(_rb_last_video)})
+
+        # POST /api/browser/agent — start AI agent task
+        if method == "POST" and path == "/api/browser/agent":
+            with _rb_agent_lock:
+                if _rb_agent_state["running"]:
+                    return self._json({"error": "agent already running"}, 409)
+            body = self._read_body()
+            task = body.get("task", "").strip()
+            if not task:
+                return self._json({"error": "task required"}, 400)
+            _rb_agent_update(
+                running=True, task=task, step=0, total_steps=0,
+                action="Initializing…", done=False, error=None, video_ready=False,
+                _profile=body.get("profile", _rb_profile),
+            )
+            threading.Thread(
+                target=_run_browser_agent,
+                args=(task, body.get("url", ""), int(body.get("max_steps", 25))),
+                daemon=True,
+            ).start()
+            return self._json({"ok": True})
+
+        # GET /api/browser/agent/status — poll agent progress
+        if method == "GET" and path == "/api/browser/agent/status":
+            with _rb_agent_lock:
+                return self._json(dict(_rb_agent_state))
+
+        # POST /api/browser/agent/stop — cancel running agent
+        if method == "POST" and path == "/api/browser/agent/stop":
+            _rb_agent_update(running=False)
+            return self._json({"ok": True})
 
         # GET /api/browser/video — download latest recorded video
         if method == "GET" and path == "/api/browser/video":
