@@ -4386,9 +4386,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .board-add-btn:active { border-color: var(--accent); color: var(--accent); }
   .board-empty { text-align: center; color: rgba(139,148,158,0.5); font-size: 0.78rem; padding: 20px 0; }
   .board-card { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
-  .board-sortable-ghost { opacity: 0.25; background: rgba(88,166,255,0.15) !important; border-color: var(--accent) !important; }
-  .board-sortable-chosen { box-shadow: 0 8px 24px rgba(0,0,0,0.5); z-index: 10; }
-  .board-sortable-drag { opacity: 0; }
+  /* Suppress all selection + set grab cursor while a board drag is in progress */
+  body.board-dragging, body.board-dragging * { user-select: none !important; -webkit-user-select: none !important; cursor: grabbing !important; }
+  /* Ghost = placeholder showing drop target */
+  .board-sortable-ghost { opacity: 0.4; background: rgba(88,166,255,0.07) !important; border: 2px dashed var(--accent) !important; border-radius: 8px; }
+  /* Chosen = original card while being held */
+  .board-sortable-chosen { opacity: 0.7; box-shadow: none; }
+  /* Drag = the floating clone following the pointer */
+  .board-sortable-drag { opacity: 0.96; box-shadow: 0 14px 36px rgba(0,0,0,0.45); transform: rotate(1.2deg) scale(1.03); border-radius: 8px; }
   .col-del-btn {
     background: none; border: none; color: var(--dim); cursor: pointer; font-size: 0.75rem;
     padding: 0 2px; line-height: 1; opacity: 0.5; transition: opacity 0.15s, color 0.15s;
@@ -10630,20 +10635,20 @@ function renderBoard() {
     container.querySelectorAll('.board-col').forEach(colEl => {
       _boardSortables.push(Sortable.create(colEl, {
         group: 'board',
-        animation: 150,
+        animation: 180,
         handle: '.board-drag-handle',
         ghostClass: 'board-sortable-ghost',
         chosenClass: 'board-sortable-chosen',
         dragClass: 'board-sortable-drag',
         filter: '.board-col-header, .board-add-btn, .board-empty',
         preventOnFilter: false,
-        delay: 200,
+        delay: 120,
         delayOnTouchOnly: true,
-        touchStartThreshold: 5,
-        forceFallback: true,
-        fallbackOnBody: true,
-        fallbackTolerance: 5,
+        touchStartThreshold: 3,
+        swapThreshold: 0.6,
+        onStart: function() { document.body.classList.add('board-dragging'); },
         onEnd: function(evt) {
+          document.body.classList.remove('board-dragging');
           const id = evt.item.dataset.id;
           const newStatus = evt.to.dataset.col;
           if (!id || !newStatus) return;
