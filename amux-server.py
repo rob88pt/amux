@@ -336,6 +336,22 @@ const { homedir } = require('os');
 const readline = require('readline');
 
 let ctx = null, page = null;
+
+function attachPageListeners(p) {
+  p.on('close', () => {
+    // If active page closed, switch to another open page
+    if (page === p && ctx) {
+      const pages = ctx.pages().filter(pg => !pg.isClosed());
+      if (pages.length > 0) page = pages[pages.length - 1];
+      else page = null;
+    }
+  });
+}
+
+function switchToPage(p) {
+  page = p;
+  attachPageListeners(p);
+}
 const PROFILES_DIR = homedir() + '/.amux/playwright-auth/profiles';
 const DEFAULT_PROFILE = homedir() + '/.amux/playwright-auth/profile';
 const VIDEOS_DIR = homedir() + '/.amux/browser-videos';
@@ -369,6 +385,12 @@ rl.on('line', async (line) => {
         }
         ctx = await chromium.launchPersistentContext(profilePath, ctxOpts);
         page = ctx.pages()[0] || await ctx.newPage();
+        attachPageListeners(page);
+        // Auto-switch to new tabs when they open
+        ctx.on('page', async (newPage) => {
+          switchToPage(newPage);
+          await newPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+        });
         if (cmd.url && !headed) {
           await page.goto(cmd.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
         }
@@ -384,12 +406,22 @@ rl.on('line', async (line) => {
       }
       case 'click': {
         if (!page) { respond({ok:false,error:'no page'}); break; }
+        const pagesBefore = ctx ? ctx.pages().length : 0;
         await page.mouse.move(cmd.x, cmd.y);
         await page.waitForTimeout(150);
         await page.mouse.click(cmd.x, cmd.y, { button: cmd.button || 'left' });
-        await page.waitForLoadState('domcontentloaded', {timeout: 5000}).catch(()=>{});
-        await page.waitForTimeout(1200);
-        respond({ ok: true, url: page.url(), title: await page.title() });
+        await page.waitForTimeout(400);
+        // If a new tab opened, ctx.on('page') already switched page; just wait for it to load
+        const pagesAfter = ctx ? ctx.pages().length : 0;
+        if (pagesAfter > pagesBefore) {
+          await page.waitForLoadState('domcontentloaded', {timeout: 8000}).catch(()=>{});
+          await page.waitForTimeout(500);
+        } else {
+          await page.waitForLoadState('domcontentloaded', {timeout: 5000}).catch(()=>{});
+          await page.waitForTimeout(800);
+        }
+        const tabs = ctx ? ctx.pages().filter(p => !p.isClosed()).map((p,i) => ({ i, url: p.url(), title: p.title() })) : [];
+        respond({ ok: true, url: page.url(), title: await page.title(), tabs });
         break;
       }
       case 'type': {
@@ -438,7 +470,54 @@ rl.on('line', async (line) => {
       case 'screenshot': {
         if (!page) { respond({ok:false,error:'no page'}); break; }
         const buf = await page.screenshot({ type: 'jpeg', quality: 70 });
-        respond({ ok: true, data: buf.toString('base64'), url: page.url(), title: await page.title() });
+        const allPages = ctx ? ctx.pages().filter(p => !p.isClosed()) : [];
+        const tabIdx = allPages.indexOf(page);
+        const tabs = await Promise.all(allPages.map(async (p, i) => ({ i, url: p.url(), title: await p.title() })));
+        respond({ ok: true, data: buf.toString('base64'), url: page.url(), title: await page.title(), tabs, activeTab: tabIdx });
+        break;
+      }
+      case 'tabs': {
+        if (!ctx) { respond({ok:false,error:'no context'}); break; }
+        const allPages = ctx.pages().filter(p => !p.isClosed());
+        const activeIdx = allPages.indexOf(page);
+        const tabs = await Promise.all(allPages.map(async (p, i) => ({ i, url: p.url(), title: await p.title() })));
+        respond({ ok: true, tabs, activeTab: activeIdx });
+        break;
+      }
+      case 'switch_tab': {
+        if (!ctx) { respond({ok:false,error:'no context'}); break; }
+        const allPages = ctx.pages().filter(p => !p.isClosed());
+        const idx = cmd.index;
+        if (idx < 0 || idx >= allPages.length) { respond({ok:false,error:'tab index out of range'}); break; }
+        switchToPage(allPages[idx]);
+        await page.bringToFront().catch(()=>{});
+        const buf = await page.screenshot({ type: 'jpeg', quality: 70 });
+        const tabs = await Promise.all(allPages.map(async (p, i) => ({ i, url: p.url(), title: await p.title() })));
+        respond({ ok: true, data: buf.toString('base64'), url: page.url(), title: await page.title(), tabs, activeTab: idx });
+        break;
+      }
+      case 'close_tab': {
+        if (!ctx) { respond({ok:false,error:'no context'}); break; }
+        const allPages = ctx.pages().filter(p => !p.isClosed());
+        const idx = cmd.index !== undefined ? cmd.index : allPages.indexOf(page);
+        if (idx >= 0 && idx < allPages.length) {
+          const toClose = allPages[idx];
+          if (toClose === page) {
+            // Switch to adjacent tab before closing
+            const next = allPages[idx + 1] || allPages[idx - 1];
+            if (next) switchToPage(next);
+          }
+          await toClose.close().catch(()=>{});
+        }
+        const remaining = ctx.pages().filter(p => !p.isClosed());
+        const tabs = await Promise.all(remaining.map(async (p, i) => ({ i, url: p.url(), title: await p.title() })));
+        const activeIdx = page ? remaining.indexOf(page) : 0;
+        if (page && !page.isClosed()) {
+          const buf = await page.screenshot({ type: 'jpeg', quality: 70 });
+          respond({ ok: true, data: buf.toString('base64'), url: page.url(), title: await page.title(), tabs, activeTab: activeIdx });
+        } else {
+          respond({ ok: true, tabs, activeTab: activeIdx });
+        }
         break;
       }
       case 'stop': {
@@ -4983,6 +5062,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <a id="rb-video-link" href="/api/browser/video" download style="color:var(--accent);text-decoration:none;font-weight:600;">Download MP4</a>
     <button class="btn" onclick="document.getElementById('rb-video-banner').style.display='none'" style="font-size:0.6rem;padding:1px 6px;margin-left:auto;">&#x2715;</button>
   </div>
+  <!-- Tab bar (hidden when only 1 tab) -->
+  <div id="rb-tab-bar" style="display:none;padding:0 12px;border-bottom:1px solid var(--border);flex-shrink:0;overflow-x:auto;white-space:nowrap;background:var(--bg);">
+  </div>
   <!-- URL bar -->
   <div style="padding:6px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);flex-shrink:0;">
     <button class="btn" onclick="_rbCmd('back')" style="font-size:0.8rem;padding:2px 6px;" title="Back">&#x25C0;</button>
@@ -8362,6 +8444,8 @@ async function _rbStop() {
   document.getElementById('rb-placeholder').style.display = '';
   document.getElementById('rb-url').value = '';
   document.getElementById('rb-status').textContent = '';
+  document.getElementById('rb-tab-bar').style.display = 'none';
+  document.getElementById('rb-tab-bar').innerHTML = '';
   const ps = document.getElementById('rb-profile-status');
   ps.textContent = '';
   ps.style.color = '';
@@ -8508,6 +8592,70 @@ async function _rbStopAgent() {
   document.getElementById('rb-screen').src = '';
 }
 
+function _rbRenderTabs(tabs, activeTab) {
+  const bar = document.getElementById('rb-tab-bar');
+  if (!bar) return;
+  if (!tabs || tabs.length <= 1) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  bar.style.alignItems = 'stretch';
+  bar.style.gap = '2px';
+  bar.style.padding = '4px 8px 0';
+  bar.innerHTML = tabs.map((t, i) => {
+    const active = i === activeTab;
+    const label = t.title || t.url || ('Tab ' + (i+1));
+    const short = label.length > 22 ? label.substring(0, 20) + '…' : label;
+    return `<div style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px 4px 10px;font-size:0.7rem;cursor:pointer;border-radius:6px 6px 0 0;border:1px solid ${active ? 'var(--border)' : 'transparent'};border-bottom:${active ? '1px solid var(--bg)' : 'none'};background:${active ? 'var(--bg)' : 'var(--card-bg)'};color:${active ? 'var(--fg)' : 'var(--dim)'};white-space:nowrap;margin-bottom:-1px;"
+      onclick="_rbSwitchTab(${i})" title="${t.url || ''}">
+      <span>${short}</span>
+      <span onclick="event.stopPropagation();_rbCloseTab(${i})" style="margin-left:2px;opacity:0.5;font-size:0.65rem;padding:0 2px;border-radius:3px;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.5'">✕</span>
+    </div>`;
+  }).join('');
+}
+
+async function _rbSwitchTab(index) {
+  if (!_rbActive) return;
+  const status = document.getElementById('rb-status');
+  status.textContent = 'Switching...';
+  try {
+    const r = await fetch(API + '/api/browser/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ action: 'switch_tab', index }),
+    });
+    const d = await r.json();
+    if (d.url) document.getElementById('rb-url').value = d.url;
+    if (d.title) status.textContent = d.title;
+    if (d.data) {
+      const img = document.getElementById('rb-screen');
+      const blob = new Blob([Uint8Array.from(atob(d.data), c => c.charCodeAt(0))], {type:'image/jpeg'});
+      const old = img.src;
+      img.src = URL.createObjectURL(blob);
+      if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
+    }
+    _rbRenderTabs(d.tabs, d.activeTab);
+  } catch(e) { status.textContent = 'Error'; }
+}
+
+async function _rbCloseTab(index) {
+  if (!_rbActive) return;
+  try {
+    const r = await fetch(API + '/api/browser/action', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ action: 'close_tab', index }),
+    });
+    const d = await r.json();
+    if (d.url) document.getElementById('rb-url').value = d.url;
+    if (d.title) document.getElementById('rb-status').textContent = d.title;
+    if (d.data) {
+      const img = document.getElementById('rb-screen');
+      const blob = new Blob([Uint8Array.from(atob(d.data), c => c.charCodeAt(0))], {type:'image/jpeg'});
+      const old = img.src;
+      img.src = URL.createObjectURL(blob);
+      if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
+    }
+    _rbRenderTabs(d.tabs, d.activeTab);
+  } catch(e) {}
+}
+
 async function _rbRefresh() {
   if (!_rbActive) return;
   const img = document.getElementById('rb-screen');
@@ -8524,6 +8672,12 @@ async function _rbRefresh() {
     if (info) document.getElementById('rb-url').value = info;
     const title = r.headers.get('X-Page-Title');
     if (title) status.textContent = decodeURIComponent(title);
+    // Render tab bar
+    const tabsHdr = r.headers.get('X-Tabs');
+    const activeHdr = r.headers.get('X-Active-Tab');
+    if (tabsHdr) {
+      try { _rbRenderTabs(JSON.parse(tabsHdr), parseInt(activeHdr || '0', 10)); } catch(e) {}
+    }
   } catch(e) {
     status.textContent = 'Offline';
   }
@@ -13734,6 +13888,10 @@ class CCHandler(BaseHTTPRequestHandler):
             if result.get("title"):
                 from urllib.parse import quote
                 self.send_header("X-Page-Title", quote(result["title"]))
+            if result.get("tabs") is not None:
+                import json as _json
+                self.send_header("X-Tabs", _json.dumps(result["tabs"]))
+                self.send_header("X-Active-Tab", str(result.get("activeTab", 0)))
             self.end_headers()
             self.wfile.write(img_data)
             return
