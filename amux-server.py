@@ -383,8 +383,11 @@ rl.on('line', async (line) => {
       }
       case 'click': {
         if (!page) { respond({ok:false,error:'no page'}); break; }
+        await page.mouse.move(cmd.x, cmd.y);
+        await page.waitForTimeout(150);
         await page.mouse.click(cmd.x, cmd.y, { button: cmd.button || 'left' });
-        await page.waitForTimeout(500);
+        await page.waitForLoadState('domcontentloaded', {timeout: 5000}).catch(()=>{});
+        await page.waitForTimeout(1200);
         respond({ ok: true, url: page.url(), title: await page.title() });
         break;
       }
@@ -404,8 +407,9 @@ rl.on('line', async (line) => {
       }
       case 'scroll': {
         if (!page) { respond({ok:false,error:'no page'}); break; }
+        await page.mouse.move(cmd.x || 640, cmd.y || 400);
         await page.mouse.wheel(0, cmd.dy || 300);
-        await page.waitForTimeout(200);
+        await page.waitForTimeout(400);
         respond({ ok: true });
         break;
       }
