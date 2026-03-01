@@ -1277,6 +1277,13 @@ CREATE TABLE IF NOT EXISTS email_events (
 );
 CREATE INDEX IF NOT EXISTS idx_email_events_account ON email_events(account_id);
 CREATE INDEX IF NOT EXISTS idx_email_events_status  ON email_events(status);
+
+CREATE TABLE IF NOT EXISTS waitlist (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    email    TEXT NOT NULL UNIQUE,
+    note     TEXT,
+    ts       INTEGER NOT NULL
+);
 """
 
 
@@ -3285,13 +3292,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .card-header-top { display: flex; align-items: center; gap: 10px; width: 100%; }
   .card-drag-handle {
     flex-shrink: 0; width: 16px; height: 20px; display: flex; align-items: center; justify-content: center;
-    cursor: grab; color: var(--dim); opacity: 0; transition: opacity 0.15s; border-radius: 3px;
+    cursor: default; color: var(--dim); opacity: 0; transition: opacity 0.15s; border-radius: 3px;
     user-select: none; -webkit-user-select: none; touch-action: none;
   }
+  .card:hover .card-drag-handle { opacity: 0.45; cursor: grab; }
+  .card-drag-handle:hover { opacity: 1 !important; cursor: grab; color: var(--fg); background: rgba(139,148,158,0.1); }
   .card-drag-handle:active { cursor: grabbing; }
-  .card:hover .card-drag-handle { opacity: 0.45; }
-  .card-drag-handle:hover { opacity: 1 !important; color: var(--fg); background: rgba(139,148,158,0.1); }
-  @media (hover: none) { .card-drag-handle { opacity: 0.35; } }
+  @media (hover: none) { .card-drag-handle { opacity: 0.35; cursor: grab; } }
   .card-header-meta { display: flex; align-items: center; gap: 6px; margin-left: 20px; min-width: 0; }
   .card-menu-btn {
     width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--border);
@@ -4425,15 +4432,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     position: absolute; top: 6px; right: 6px;
     width: 24px; height: 24px;
     display: flex; align-items: center; justify-content: center;
-    cursor: grab; color: var(--dim); opacity: 0;
+    cursor: default; color: var(--dim); opacity: 0;
     transition: opacity 0.15s;
     border-radius: 4px;
     touch-action: none;
   }
+  .board-card:hover .board-drag-handle { opacity: 0.55; cursor: grab; }
+  .board-drag-handle:hover { opacity: 1 !important; cursor: grab; color: var(--fg); background: rgba(139,148,158,0.12); }
   .board-drag-handle:active { cursor: grabbing; }
-  .board-card:hover .board-drag-handle { opacity: 0.55; }
-  .board-drag-handle:hover { opacity: 1 !important; color: var(--fg); background: rgba(139,148,158,0.12); }
-  @media (hover: none) { .board-drag-handle { opacity: 0.5; width: 32px; height: 32px; } }
+  @media (hover: none) { .board-drag-handle { opacity: 0.5; width: 32px; height: 32px; cursor: grab; } }
   .board-card.card-enter { animation: cardEnter 0.3s cubic-bezier(.4,0,.2,1) both; }
   .board-card.card-flip { transition: transform 0.35s cubic-bezier(.4,0,.2,1); }
   @keyframes cardEnter {
@@ -9767,6 +9774,16 @@ function initSortable() {
 function destroySortable() {
   if (_sortable) { try { _sortable.destroy(); } catch(e) {} _sortable = null; }
 }
+
+// Safety net: if a drag ends abnormally (Escape, window blur, cancelled by browser),
+// onEnd may not fire — clean up the dragging body classes so cursor resets.
+function _clearDragClasses() {
+  document.body.classList.remove('board-dragging', 'session-dragging');
+}
+document.addEventListener('mouseup', _clearDragClasses);
+document.addEventListener('pointerup', _clearDragClasses);
+document.addEventListener('dragend', _clearDragClasses);
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') _clearDragClasses(); });
 
 function tileMouseDown(e, name) {} // no-op — kept so card HTML doesn't break
 
@@ -15290,6 +15307,30 @@ class CCHandler(BaseHTTPRequestHandler):
 
                 return self._json({"error": "nothing to update"}, 400)
             return self._json({"error": "not found"}, 404)
+
+        # ── Cloud Waitlist ──
+        if path == "/api/waitlist":
+            db = get_db()
+            if method == "POST":
+                body = self._read_body()
+                email = body.get("email", "").strip().lower()
+                if not email or "@" not in email:
+                    return self._json({"error": "invalid email"}, 400)
+                note = body.get("note", "").strip()[:500]
+                try:
+                    db.execute(
+                        "INSERT INTO waitlist (email, note, ts) VALUES (?,?,?)",
+                        (email, note or None, int(time.time()))
+                    )
+                    db.commit()
+                    return self._json({"ok": True})
+                except sqlite3.IntegrityError:
+                    return self._json({"ok": True, "already": True})
+            if method == "GET":
+                rows = db.execute(
+                    "SELECT id, email, note, ts FROM waitlist ORDER BY ts DESC"
+                ).fetchall()
+                return self._json([dict(r) for r in rows])
 
         return self._json({"error": "method not allowed"}, 405)
 
