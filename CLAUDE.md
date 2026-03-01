@@ -39,3 +39,18 @@ S3 bucket config (one-time, already done on `ethan-personal`):
 - Public URL: `https://ethan-personal.s3.us-east-2.amazonaws.com/amux/calendar.ics`
 
 The feed auto-uploads to S3 on every board write (POST/PATCH/DELETE). The dashboard's calendar subscription button shows the S3 URL directly when configured.
+
+## Browser Automation
+
+Always use the `claude-in-chrome` MCP server for browser tasks (tools: `mcp__claude-in-chrome__*`). Do not use Playwright or any other browser MCP unless explicitly asked. claude-in-chrome connects directly to the user's Chrome browser and preserves session state across navigations.
+
+**Localhost bypass**: Chrome's Private Network Access policy blocks extension-managed tabs from reaching `localhost`/`127.0.0.1`. To use claude-in-chrome with the amux dashboard, first start an ngrok tunnel and use the public URL:
+
+```bash
+# Step 1 — start tunnel
+ngrok http https://localhost:8822 --host-header=localhost > /tmp/ngrok.log 2>&1 &
+# Step 2 — get URL (run as a separate command after a few seconds)
+sleep 4 && curl -s http://localhost:4040/api/tunnels | python3 -c "import json,sys; print(json.load(sys.stdin)['tunnels'][0]['public_url'])"
+```
+
+Navigate to the printed ngrok URL. If an ngrok interstitial appears, find and click the "Visit Site" button (`mcp__claude-in-chrome__find` then click). Kill ngrok when done: `pkill -f "ngrok http"`.
