@@ -7303,7 +7303,13 @@ async function sendFromInput(name) {
   cmdHistoryAdd(text);
   inp.value = '';
   inp.style.height = 'auto';
-  await doSend(name, _expandAtMentions(text));
+  const routed = _atRoute(text);
+  if (routed) {
+    await doSend(routed.target, routed.message);
+    showToast('Sent to @' + routed.target);
+  } else {
+    await doSend(name, _expandAtMentions(text));
+  }
   inp.style.borderColor = 'var(--green)';
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
 }
@@ -8021,14 +8027,19 @@ async function sendPeekCmd() {
     const refs = files.map(f => '@' + f.path).join(' ');
     message = text ? `${text} ${refs}` : refs;
   }
-  message = _expandAtMentions(message);
-
   inp.value = '';
   inp.style.height = 'auto';
   delete _peekDrafts[peekSession];
   clearPeekFiles();
 
-  await doSend(peekSession, message);
+  const routed = files.length === 0 && _atRoute(message);
+  if (routed) {
+    await doSend(routed.target, routed.message);
+    showToast('Sent to @' + routed.target);
+  } else {
+    message = _expandAtMentions(message);
+    await doSend(peekSession, message);
+  }
   inp.style.borderColor = 'var(--green)';
   setTimeout(() => { inp.style.borderColor = ''; }, 400);
   setTimeout(refreshPeek, 500);
@@ -8042,6 +8053,20 @@ async function peekQuickKeys(keys) {
   if (!peekSession) return;
   await doKeys(peekSession, keys);
   setTimeout(refreshPeek, 500);
+}
+
+// ── @mention routing ──
+// If a message starts with @sessionname, auto-route to that session.
+// Returns {target, message} where target may differ from the sending session.
+function _atRoute(text) {
+  const known = (sessions || []).map(s => s.name);
+  const m = text.match(/^@([\w][\w.-]*)([\s\S]*)$/);
+  if (m && known.includes(m[1])) {
+    const target = m[1];
+    const rest = m[2].trim();
+    return { target, message: rest || text };
+  }
+  return null;
 }
 
 // ── @mention → HTTP API hint ──
