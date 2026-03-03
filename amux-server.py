@@ -5842,15 +5842,21 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
     </div>
     <div class="field-group" id="create-template-field">
-      <label class="field-label">Template <span class="field-optional">(optional)</span></label>
-      <div id="tmpl-accordion" class="tmpl-accordion" style="display:none;"></div>
-      <div id="tmpl-selected-wrap" style="display:none;">
-        <span class="tmpl-selected-chip" id="tmpl-selected-chip">
-          <span id="tmpl-selected-text"></span>
-          <button onclick="_clearTemplate()" title="Remove template">&#x2715;</button>
-        </span>
+      <div class="field-label" onclick="_toggleTmplSection()" style="cursor:pointer;display:flex;align-items:center;gap:6px;user-select:none;">
+        <span id="tmpl-section-chev" style="font-size:0.7rem;color:var(--dim);transition:transform 0.15s;">&#x25B6;</span>
+        Template <span class="field-optional">(optional)</span>
+        <span id="tmpl-selected-badge" style="display:none;margin-left:4px;font-size:0.72rem;background:rgba(99,102,241,0.15);color:#818cf8;border-radius:4px;padding:1px 7px;font-weight:600;"></span>
       </div>
-      <div id="tmpl-loading" style="font-size:0.75rem;color:var(--dim);padding:4px 0;">Loading templates…</div>
+      <div id="tmpl-section-body" style="display:none;margin-top:6px;">
+        <div id="tmpl-accordion" class="tmpl-accordion" style="display:none;"></div>
+        <div id="tmpl-selected-wrap" style="display:none;">
+          <span class="tmpl-selected-chip" id="tmpl-selected-chip">
+            <span id="tmpl-selected-text"></span>
+            <button onclick="_clearTemplate()" title="Remove template">&#x2715;</button>
+          </span>
+        </div>
+        <div id="tmpl-loading" style="font-size:0.75rem;color:var(--dim);padding:4px 0;">Loading templates…</div>
+      </div>
     </div>
     <div class="field-group">
       <label class="field-label">Initial prompt <span class="field-optional">(optional)</span></label>
@@ -10203,12 +10209,12 @@ function openCreate() {
   document.getElementById('ac-list').innerHTML = '';
   document.getElementById('ac-list').classList.remove('open');
   _createBranchEdited = false;
-  // Reset template state
+  // Reset template state — section collapsed by default
   _selectedTemplate = null;
+  document.getElementById('tmpl-section-body').style.display = 'none';
+  document.getElementById('tmpl-section-chev').style.transform = '';
+  document.getElementById('tmpl-selected-badge').style.display = 'none';
   document.getElementById('tmpl-selected-wrap').style.display = 'none';
-  document.getElementById('tmpl-accordion').style.display = _templatesLoaded ? '' : 'none';
-  document.getElementById('tmpl-loading').style.display = _templatesLoaded ? 'none' : '';
-  _loadTemplates();
   document.getElementById('create-overlay').classList.add('active');
   setTimeout(() => document.getElementById('create-name').focus({ preventScroll: true }), 100);
 }
@@ -10258,6 +10264,23 @@ function _renderTemplateAccordion() {
   acc.style.display = '';
 }
 
+function _toggleTmplSection() {
+  const body = document.getElementById('tmpl-section-body');
+  const chev = document.getElementById('tmpl-section-chev');
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  chev.style.transform = open ? 'rotate(90deg)' : '';
+  if (open) {
+    // Lazy-load templates on first expand
+    if (!_templatesLoaded) {
+      _loadTemplates();
+    } else {
+      document.getElementById('tmpl-accordion').style.display = _selectedTemplate ? 'none' : '';
+      document.getElementById('tmpl-loading').style.display = 'none';
+    }
+  }
+}
+
 function _toggleTmplItem(i) {
   document.getElementById('tmpl-item-' + i)?.classList.toggle('open');
 }
@@ -10267,6 +10290,10 @@ function _selectTemplate(i) {
   document.getElementById('tmpl-accordion').style.display = 'none';
   document.getElementById('tmpl-selected-wrap').style.display = '';
   document.getElementById('tmpl-selected-text').textContent = (_selectedTemplate.icon || '') + ' ' + _selectedTemplate.label;
+  // Show badge in collapsed header
+  const badge = document.getElementById('tmpl-selected-badge');
+  badge.textContent = (_selectedTemplate.icon || '') + ' ' + _selectedTemplate.label;
+  badge.style.display = '';
   // Auto-fill initial prompt if field is empty and template has one
   const promptEl = document.getElementById('create-prompt');
   if (_selectedTemplate.initial_prompt && !promptEl.value.trim()) {
@@ -10278,6 +10305,7 @@ function _clearTemplate() {
   _selectedTemplate = null;
   document.getElementById('tmpl-accordion').style.display = '';
   document.getElementById('tmpl-selected-wrap').style.display = 'none';
+  document.getElementById('tmpl-selected-badge').style.display = 'none';
 }
 function _createNameChanged(val) {
   // Auto-update branch name if user hasn't manually edited it
