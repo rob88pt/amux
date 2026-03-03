@@ -6921,6 +6921,7 @@ function render() {
     el.innerHTML = draftCards + sortedFiltered.map(_renderSessionCard).join('');
     for (const [id, val] of Object.entries(savedInputs)) { const inp = document.getElementById(id); if (inp) { inp.value = val; autoGrow(inp); } }
     if (focusedId) { const inp = document.getElementById(focusedId); if (inp) inp.focus({ preventScroll: true }); }
+    _renderArchivedSection();
     requestAnimationFrame(initSortable);
     return;
   }
