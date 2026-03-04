@@ -5692,6 +5692,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="btn" id="files-cache-btn" onclick="cacheFilesDir(_filesPath)" style="font-size:0.7rem;padding:2px 8px;" title="Cache directory for offline viewing">&#x2601; Cache</button>
     <span id="files-cache-status" style="font-size:0.7rem;color:var(--dim);white-space:nowrap;"></span>
   </div>
+  <div style="padding:6px 12px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <input id="files-search" type="search" placeholder="Search files…" autocomplete="off"
+      style="width:100%;background:var(--input,var(--card));border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:0.82rem;color:var(--text);outline:none;"
+      oninput="_filesSearchFilter(this.value)">
+  </div>
   <div id="files-body" style="flex:1;overflow-y:auto;padding:0;"></div>
 </div>
 
@@ -6318,6 +6323,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="btn" onclick="triggerExploreUpload()" style="font-size:0.7rem;padding:2px 8px;" title="Upload files to current directory">&#x2191; Upload</button>
     <input type="file" id="explore-upload-input" multiple style="display:none;" onchange="handleExploreUpload(this.files)">
     <button class="btn" onclick="closeExplore()">&#x2715;</button>
+  </div>
+  <div style="padding:6px 12px;border-bottom:1px solid var(--border);">
+    <input id="explore-search" type="search" placeholder="Search files…" autocomplete="off"
+      style="width:100%;background:var(--input,var(--card));border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:0.82rem;color:var(--text);outline:none;"
+      oninput="_exploreSearchFilter(this.value)">
+  </div>
   </div>
   <div id="explore-pins-section" style="display:none;border-bottom:1px solid var(--border);background:var(--card);"></div>
   <div id="explore-body" class="file-overlay-body" style="padding:0;overflow-y:auto;"></div>
@@ -9887,6 +9898,8 @@ function _rbTypeKey(event) {
 let _explorePath = '';
 let _exploreShowHidden = false;
 let _explorePins = [];  // pinned paths for current session
+let _exploreLastData = null;  // last loaded dir data (for search re-filter)
+let _filesLastData = null;    // last loaded dir data for Files tab
 
 async function _loadExplorePins(session) {
   _explorePins = [];
@@ -9955,6 +9968,7 @@ async function loadFiles(path) {
   const body = document.getElementById('files-body');
   body.innerHTML = '<div style="padding:16px;color:var(--dim)">Loading...</div>';
   _filesPath = path;
+  const srch = document.getElementById('files-search'); if (srch) srch.value = '';
   _updateFilesCwdBtn();
   // Breadcrumb
   const parts = path.split('/').filter(Boolean);
@@ -9983,24 +9997,28 @@ async function loadFiles(path) {
   }
 }
 function _renderFilesEntries(body, path, data, cacheTs) {
+  _filesLastData = { path, data, cacheTs };  // cache for search re-filter
   body.innerHTML = '';
   if (cacheTs) {
     const age = Math.round((Date.now() - cacheTs) / 60000);
     const ageStr = age < 60 ? age + 'm ago' : Math.round(age/60) + 'h ago';
     body.innerHTML = '<div style="padding:4px 12px;font-size:0.7rem;color:var(--dim);background:var(--card);border-bottom:1px solid var(--border);">&#x1F4F5; Offline cache &middot; ' + ageStr + '</div>';
   }
-  if (data.parent && data.parent !== data.path) {
+  const q = (document.getElementById('files-search')?.value || '').toLowerCase();
+  const entries = q ? data.entries.filter(e => e.name.toLowerCase().includes(q)) : data.entries;
+  if (!q && data.parent && data.parent !== data.path) {
     const back = document.createElement('div');
     back.className = 'explore-row';
     back.innerHTML = '<span class="explore-icon">&#x2B05;</span><span class="explore-name" style="color:var(--dim)">.. (up)</span>';
     back.onclick = () => loadFiles(data.parent);
     body.appendChild(back);
   }
-  if (!data.entries.length) {
-    body.innerHTML += '<div style="padding:16px;color:var(--dim)">Empty directory</div>';
+  if (!entries.length) {
+    const msg = q ? `No results for "${q}"` : 'Empty directory';
+    body.innerHTML += `<div style="padding:16px;color:var(--dim)">${esc(msg)}</div>`;
     return;
   }
-  for (const entry of data.entries) {
+  for (const entry of entries) {
     const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
     const row = document.createElement('div');
     row.className = 'explore-row';
@@ -10008,7 +10026,8 @@ function _renderFilesEntries(body, path, data, cacheTs) {
     const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
     const menuBtn = '<button class="explore-menu-btn" title="Options" onclick="event.stopPropagation();_showFilesMenu(\'' + entryPath.replace(/'/g, "\\'") + '\',this,\'' + entry.type + '\')">⋯</button>';
     const mtime = entry.modified ? '<span class="explore-mtime">' + timeAgo(entry.modified) + '</span>' : '';
-    row.innerHTML = '<span class="explore-icon">' + icon + '</span><span class="explore-name">' + esc(displayName) + '</span><span class="explore-size">' + esc(_fmtSize(entry.size)) + '</span>' + mtime + menuBtn;
+    const nameHtml = q ? esc(displayName).replace(new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi'), m => `<mark style="background:var(--accent-muted,rgba(99,102,241,0.25));color:inherit;border-radius:2px;">${m}</mark>`) : esc(displayName);
+    row.innerHTML = '<span class="explore-icon">' + icon + '</span><span class="explore-name">' + nameHtml + '</span><span class="explore-size">' + esc(_fmtSize(entry.size)) + '</span>' + mtime + menuBtn;
     if (entry.type === 'dir') {
       row.onclick = () => loadFiles(entryPath);
     } else {
@@ -10020,6 +10039,12 @@ function _renderFilesEntries(body, path, data, cacheTs) {
   body.ondragover = e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; body.classList.add('files-drop-active'); };
   body.ondragleave = () => body.classList.remove('files-drop-active');
   body.ondrop = e => { e.preventDefault(); body.classList.remove('files-drop-active'); if (e.dataTransfer.files.length) handleFilesUpload(e.dataTransfer.files); };
+}
+function _filesSearchFilter(q) {
+  const body = document.getElementById('files-body');
+  if (!body || !_filesLastData) return;
+  const { path, data, cacheTs } = _filesLastData;
+  _renderFilesEntries(body, path, data, cacheTs);
 }
 
 function triggerFilesUpload() {
@@ -10272,6 +10297,7 @@ async function loadExplore(path) {
   _renderExplorePinnedSection();
   body.innerHTML = '<div style="padding:16px;color:var(--dim)">Loading...</div>';
   _explorePath = path;
+  const srch = document.getElementById('explore-search'); if (srch) srch.value = '';
   // Build breadcrumb
   const parts = path.split('/').filter(Boolean);
   let crumbHtml = `<span class="explore-crumb" onclick="loadExplore('/')">/</span>`;
@@ -10298,6 +10324,7 @@ async function loadExplore(path) {
   }
 }
 function _renderExploreEntries(body, path, data, cacheTs) {
+  _exploreLastData = { path, data, cacheTs };  // cache for search re-filter
   body.innerHTML = '';
   body.ondragover = e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; body.classList.add('files-drop-active'); };
   body.ondragleave = () => body.classList.remove('files-drop-active');
@@ -10307,18 +10334,21 @@ function _renderExploreEntries(body, path, data, cacheTs) {
     const ageStr = age < 60 ? age + 'm ago' : Math.round(age/60) + 'h ago';
     body.innerHTML = '<div style="padding:4px 12px;font-size:0.7rem;color:var(--dim);background:var(--card);border-bottom:1px solid var(--border);">&#x1F4F5; Offline cache &middot; ' + ageStr + '</div>';
   }
-  if (data.parent && data.parent !== data.path) {
+  const q = (document.getElementById('explore-search')?.value || '').toLowerCase();
+  const entries = q ? data.entries.filter(e => e.name.toLowerCase().includes(q)) : data.entries;
+  if (!q && data.parent && data.parent !== data.path) {
     const back = document.createElement('div');
     back.className = 'explore-row';
     back.innerHTML = `<span class="explore-icon">&#x2B05;</span><span class="explore-name" style="color:var(--dim)">.. (up)</span>`;
     back.onclick = () => loadExplore(data.parent);
     body.appendChild(back);
   }
-  if (!data.entries.length) {
-    body.innerHTML += '<div style="padding:16px;color:var(--dim)">Empty directory</div>';
+  if (!entries.length) {
+    const msg = q ? `No results for "${q}"` : 'Empty directory';
+    body.innerHTML += `<div style="padding:16px;color:var(--dim)">${esc(msg)}</div>`;
     return;
   }
-  for (const entry of data.entries) {
+  for (const entry of entries) {
     const entryPath = path.replace(/\/$/, '') + '/' + entry.name;
     const row = document.createElement('div');
     row.className = 'explore-row';
@@ -10326,7 +10356,8 @@ function _renderExploreEntries(body, path, data, cacheTs) {
     const displayName = entry.name + (entry.type === 'dir' ? '/' : '');
     const menuBtn = `<button class="explore-menu-btn" title="Options" onclick="event.stopPropagation();_showExploreMenu('${entryPath.replace(/'/g,"\\'")}',this,'${entry.type}')">⋯</button>`;
     const mtime = entry.modified ? `<span class="explore-mtime">${timeAgo(entry.modified)}</span>` : '';
-    row.innerHTML = `<span class="explore-icon">${icon}</span><span class="explore-name">${esc(displayName)}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>${mtime}${menuBtn}`;
+    const nameHtml = q ? esc(displayName).replace(new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'), 'gi'), m => `<mark style="background:var(--accent-muted,rgba(99,102,241,0.25));color:inherit;border-radius:2px;">${m}</mark>`) : esc(displayName);
+    row.innerHTML = `<span class="explore-icon">${icon}</span><span class="explore-name">${nameHtml}</span><span class="explore-size">${esc(_fmtSize(entry.size))}</span>${mtime}${menuBtn}`;
     if (entry.type === 'dir') {
       row.onclick = () => loadExplore(entryPath);
     } else {
@@ -10334,6 +10365,12 @@ function _renderExploreEntries(body, path, data, cacheTs) {
     }
     body.appendChild(row);
   }
+}
+function _exploreSearchFilter(q) {
+  const body = document.getElementById('explore-body');
+  if (!body || !_exploreLastData) return;
+  const { path, data, cacheTs } = _exploreLastData;
+  _renderExploreEntries(body, path, data, cacheTs);
 }
 
 // Swipe right to close file preview
