@@ -15602,7 +15602,14 @@ class CCHandler(BaseHTTPRequestHandler):
                 for f in sorted(CC_NOTES.rglob("*.md"), key=lambda p: -p.stat().st_mtime):
                     rel = str(f.relative_to(CC_NOTES))
                     stat = f.stat()
-                    notes.append({"path": rel, "name": f.stem, "size": stat.st_size, "updated": int(stat.st_mtime)})
+                    # Extract H1 title from first line if present
+                    try:
+                        first_line = f.open().readline().strip()
+                        h1 = first_line[2:].strip() if first_line.startswith("# ") else ""
+                    except Exception:
+                        h1 = ""
+                    name = h1 or f.stem
+                    notes.append({"path": rel, "name": name, "size": stat.st_size, "updated": int(stat.st_mtime)})
             return self._json(notes)
 
         if path.startswith("/api/notes/"):
