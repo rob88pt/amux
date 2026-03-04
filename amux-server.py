@@ -16361,6 +16361,8 @@ class CCHandler(BaseHTTPRequestHandler):
                         lines.append(f"{key}={val}")
                     os.environ[key] = val  # live effect
                 _server_env_file.write_text("\n".join(lines) + "\n")
+                if "ANTHROPIC_API_KEY" in updates:
+                    _init_claude_config()
                 return self._json({"ok": True})
 
         # ── Org / Team / Invites ──────────────────────────────────────────────
