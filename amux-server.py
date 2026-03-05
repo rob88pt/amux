@@ -11745,7 +11745,18 @@ function switchView(view) {
   if (view === 'reports') fetchReports();
   if (view === 'browser') _rbLoadProfiles();
   if (view === 'email') _emailLoad();
-  if (view === 'notes') { _notesInitQuill(); _notesApplySidebarState(); if (!_notesAllNotes.length) _notesLoad(); else _notesRenderList(_notesAllNotes); }
+  if (view === 'notes') {
+    _notesInitQuill(); _notesApplySidebarState();
+    if (!_notesAllNotes.length) { _notesLoad(); }
+    else {
+      _notesRenderList(_notesAllNotes);
+      if (!_notesActive && _notesAllNotes.length > 0) {
+        const lastPath = localStorage.getItem('amux_last_note');
+        const lastNote = lastPath && _notesAllNotes.find(n => n.path === lastPath);
+        _notesOpen(lastNote ? lastNote.path : _notesAllNotes[0].path);
+      }
+    }
+  }
   if (view === 'logs') { fetchLogs(); _startLogsTimer(); } else { _stopLogsTimer(); }
   if (view === 'board') {
     renderBoard();
@@ -15003,7 +15014,9 @@ async function _notesLoad() {
   if (!_notesActive && _notesAllNotes.length === 0) {
     _notesShowEmpty();
   } else if (!_notesActive && _notesAllNotes.length > 0) {
-    await _notesOpen(_notesAllNotes[0].path);
+    const lastPath = localStorage.getItem('amux_last_note');
+    const lastNote = lastPath && _notesAllNotes.find(n => n.path === lastPath);
+    await _notesOpen(lastNote ? lastNote.path : _notesAllNotes[0].path);
   }
 }
 
@@ -15046,6 +15059,7 @@ async function _notesOpen(path) {
   if (!r.ok) return;
   const data = await r.json();
   _notesActive = { path: data.path };
+  localStorage.setItem('amux_last_note', data.path);
   // Derive title from content H1 or filename
   const h1html = data.content.match(/<h1[^>]*>(.*?)<\/h1>/i);
   const h1md = data.content.match(/^#\s+(.+)$/m);
@@ -15159,11 +15173,36 @@ async function _notesSave() {
 
 async function _notesDelete() {
   if (!_notesActive) return;
+  const btn = document.querySelector('.notes-delete-btn');
+  if (btn && !btn.dataset.confirming) {
+    btn.dataset.confirming = '1';
+    btn.textContent = 'Delete?';
+    btn.style.cssText += ';background:var(--danger,#e53e3e);color:#fff;border-radius:4px;padding:2px 6px';
+    const reset = () => {
+      if (!btn.dataset.confirming) return;
+      delete btn.dataset.confirming;
+      btn.innerHTML = '&#x1F5D1;';
+      btn.style.cssText = btn.style.cssText.replace(/;?background:[^;]+;color:[^;]+;border-radius:[^;]+;padding:[^;]+/g, '');
+    };
+    setTimeout(reset, 3000);
+    return;
+  }
+  if (btn) {
+    delete btn.dataset.confirming;
+    btn.innerHTML = '&#x1F5D1;';
+    btn.style.cssText = btn.style.cssText.replace(/;?background:[^;]+;color:[^;]+;border-radius:[^;]+;padding:[^;]+/g, '');
+  }
   const pathKey = _notesActive.path.replace(/\.md$/, '');
-  await apiCall(API + '/api/notes/' + encodeURIComponent(pathKey), { method: 'DELETE' });
+  if (localStorage.getItem('amux_last_note') === _notesActive.path) localStorage.removeItem('amux_last_note');
+  _notesAllNotes = _notesAllNotes.filter(n => n.path !== _notesActive.path);
   _notesActive = null;
-  _notesShowEmpty();
-  await _notesLoad();
+  await apiCall(API + '/api/notes/' + encodeURIComponent(pathKey), { method: 'DELETE' });
+  if (_notesAllNotes.length > 0) {
+    await _notesOpen(_notesAllNotes[0].path);
+  } else {
+    _notesShowEmpty();
+    await _notesLoad();
+  }
 }
 
 function _notesShowEmpty() {
@@ -15866,7 +15905,16 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "path": note_rel})
             if method == "DELETE":
                 if note_path.exists():
-                    note_path.unlink()
+                    trash_dir = CC_NOTES / ".trash"
+                    trash_dir.mkdir(parents=True, exist_ok=True)
+                    dest = trash_dir / note_path.name
+                    if dest.exists():
+                        stem, ext = note_path.stem, note_path.suffix
+                        i = 1
+                        while (trash_dir / f"{stem}-{i}{ext}").exists():
+                            i += 1
+                        dest = trash_dir / f"{stem}-{i}{ext}"
+                    note_path.rename(dest)
                 return self._json({"ok": True})
 
         # GET /api/skills — list skills from shared library (~/.amux/skills/)
