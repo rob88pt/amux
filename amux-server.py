@@ -1669,6 +1669,110 @@ def _init_claude_config():
     if changed:
         claude_json.write_text(_json.dumps(cfg, indent=2))
 
+    # ── ~/.claude/settings.json — yolo mode + auto-accept ────────────────────
+    # skipDangerousModePermissionPrompt: skip the "enter dangerous mode?" prompt
+    # when --dangerously-skip-permissions is passed (yolo mode).
+    # Permissions allow list matches what --dangerously-skip-permissions grants.
+    settings_file = _pathlib.Path.home() / ".claude" / "settings.json"
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        settings = _json.loads(settings_file.read_text()) if settings_file.exists() else {}
+    except Exception:
+        settings = {}
+    settings_changed = False
+    if not settings.get("skipDangerousModePermissionPrompt"):
+        settings["skipDangerousModePermissionPrompt"] = True
+        settings_changed = True
+    # Ensure Bash(*) is allowed so yolo sessions don't get blocked
+    perms = settings.setdefault("permissions", {})
+    allow = perms.setdefault("allow", [])
+    if "Bash(*)" not in allow:
+        allow.append("Bash(*)")
+        settings_changed = True
+    if settings_changed:
+        settings_file.write_text(_json.dumps(settings, indent=2))
+
+    # ── ~/.claude/commands/ — skills as slash commands ────────────────────────
+    # Sync all skills from SQLite into ~/.claude/commands/ so they're available
+    # as /skill-name slash commands in every Claude session.
+    try:
+        commands_dir = _pathlib.Path.home() / ".claude" / "commands"
+        commands_dir.mkdir(parents=True, exist_ok=True)
+        db = get_db()
+        rows = db.execute("SELECT name, content FROM skills").fetchall()
+        for row in rows:
+            try:
+                (commands_dir / (row["name"] + ".md")).write_text(row["content"])
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # ── /usr/local/bin/amux — CLI stub for sessions ───────────────────────────
+    # Writes a minimal amux shim so Claude sessions can use `amux board ...`
+    # commands without needing the full amux bash script installed.
+    _amux_stub = r"""#!/bin/sh
+# amux CLI stub — proxies board/session commands to the amux server API
+AMUX_URL="${AMUX_URL:-https://localhost:8822}"
+cmd="$1"; shift 2>/dev/null || true
+
+case "$cmd" in
+  board)
+    sub="$1"; shift 2>/dev/null || true
+    case "$sub" in
+      done|doing|todo|backlog|discarded)
+        for id in "$@"; do
+          curl -sk -X PATCH -H 'Content-Type: application/json' \
+            -d "{\"status\":\"$sub\"}" "$AMUX_URL/api/board/$id" >/dev/null
+        done ;;
+      add)
+        title="$*"
+        curl -sk -X POST -H 'Content-Type: application/json' \
+          -d "{\"title\":\"$title\",\"status\":\"todo\"}" "$AMUX_URL/api/board" ;;
+      list|ls|"")
+        curl -sk "$AMUX_URL/api/board" | python3 -c "
+import json,sys
+items=json.load(sys.stdin)
+for i in items: print(i.get('id',''),i.get('status',''),i.get('title',''))" ;;
+      *) echo "amux board: unknown subcommand: $sub" >&2; exit 1 ;;
+    esac ;;
+  session|sessions)
+    curl -sk "$AMUX_URL/api/sessions" | python3 -c "
+import json,sys
+for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') else '')" ;;
+  help|--help|-h|"")
+    echo "amux board <done|doing|todo> <ITEM_ID>  — update board item status"
+    echo "amux board add <title>                  — create a new board item"
+    echo "amux board list                         — list board items"
+    echo "amux sessions                           — list sessions" ;;
+  *) echo "amux: unknown command: $cmd" >&2; exit 1 ;;
+esac
+"""
+    stub_path = _pathlib.Path("/usr/local/bin/amux")
+    try:
+        if not stub_path.exists() or stub_path.read_text() != _amux_stub:
+            stub_path.write_text(_amux_stub)
+            stub_path.chmod(0o755)
+    except Exception:
+        pass  # may not have write permission on local dev machines
+
+
+def _sync_skills_to_commands():
+    """Write a single skill to ~/.claude/commands/ after save."""
+    try:
+        import pathlib as _p, json as _j
+        commands_dir = _p.Path.home() / ".claude" / "commands"
+        commands_dir.mkdir(parents=True, exist_ok=True)
+        db = get_db()
+        rows = db.execute("SELECT name, content FROM skills").fetchall()
+        for row in rows:
+            try:
+                (commands_dir / (row["name"] + ".md")).write_text(row["content"])
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 
 def _init_db():
     """Create SQLite tables if they don't exist."""
@@ -16585,6 +16689,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 (skills_dir / (name + ".md")).write_text(content)
             except Exception:
                 pass
+            # Keep ~/.claude/commands/ in sync so Claude sees the updated skill immediately
+            _sync_skills_to_commands()
             return self._json({"ok": True, "name": name})
 
         # DELETE /api/skills/<name> — delete a skill
