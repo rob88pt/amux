@@ -8262,7 +8262,8 @@ let hiddenTabs = (function() {
     const s = localStorage.getItem('amux_hidden_tabs');
     if (s !== null) return new Set(JSON.parse(s));
   } catch(e) {}
-  return new Set(['notifications']); // default: notifications hidden
+  // Default for new installs: show only sessions, board, files, notes, workspace
+  return new Set(['calendar','scheduler','reports','notifications','logs','browser','email']);
 })();
 
 let tabOrder = (function() {
