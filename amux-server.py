@@ -798,10 +798,12 @@ def _refresh_token_cache():
         jsonl_files = sorted(proj_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
         if not jsonl_files:
             continue
-        total = 0
+        dir_total = 0
         last_ts = 0
         # Read tail of top 5 most recent JSONL files to cover multiple conversations
         for jf in jsonl_files[:5]:
+            file_total = 0
+            file_last_ts = 0
             try:
                 size = jf.stat().st_size
                 with jf.open("rb") as fh:
@@ -822,6 +824,8 @@ def _refresh_token_cache():
                                     ).timestamp())
                                     if ts_unix > last_ts:
                                         last_ts = ts_unix
+                                    if ts_unix > file_last_ts:
+                                        file_last_ts = ts_unix
                                 except Exception:
                                     pass
                             usage = entry.get("message", {}).get("usage", {})
@@ -832,18 +836,27 @@ def _refresh_token_cache():
                                 if sig == prev_sig:
                                     continue
                                 prev_sig = sig
-                                total += usage.get("input_tokens", 0)
-                                total += usage.get("cache_read_input_tokens", 0)
-                                total += usage.get("cache_creation_input_tokens", 0)
-                                total += usage.get("output_tokens", 0)
+                                t = (usage.get("input_tokens", 0)
+                                     + usage.get("cache_read_input_tokens", 0)
+                                     + usage.get("cache_creation_input_tokens", 0)
+                                     + usage.get("output_tokens", 0))
+                                file_total += t
+                                dir_total += t
                             else:
                                 prev_sig = None
                         except (json.JSONDecodeError, AttributeError):
                             continue
             except Exception:
                 continue
-        if total > 0:
-            result[proj_dir.name] = total
+            # Store per-conversation-ID totals so sessions with cc_conversation_id
+            # can look up their own JSONL directly (avoids sharing counts when
+            # multiple sessions share the same CC_DIR).
+            conv_id = jf.stem  # JSONL filename = Claude session UUID
+            result[(proj_dir.name, conv_id)] = file_total
+            if file_last_ts:
+                ts_result[(proj_dir.name, conv_id)] = file_last_ts
+        if dir_total > 0:
+            result[proj_dir.name] = dir_total
         if last_ts > 0:
             ts_result[proj_dir.name] = last_ts
     _token_cache["data"] = result
@@ -2798,9 +2811,15 @@ def list_sessions() -> list:
         active_model = detect_active_model(raw_dir)
         # Parse task time from spinner line
         task_time = _parse_task_time(raw) if raw else ""
-        # Token count from JSONL cache (refreshed once above the loop)
+        # Token count from JSONL cache (refreshed once above the loop).
+        # Prefer per-conversation lookup (avoids sharing counts across sessions
+        # that share the same CC_DIR, common in cloud where all sessions run in /root/).
         proj_key = resolved_dir.replace("/", "-") if resolved_dir else ""
-        tokens = _token_cache["data"].get(proj_key, 0)
+        conv_id = meta.get("cc_conversation_id", "")
+        if conv_id and proj_key:
+            tokens = _token_cache["data"].get((proj_key, conv_id), 0)
+        else:
+            tokens = _token_cache["data"].get(proj_key, 0)
         sessions.append({
             "name": name,
             "dir": resolved_dir,
