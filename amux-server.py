@@ -924,8 +924,8 @@ def tmux_name(session: str) -> str:
 
 
 def tmux_target(session: str) -> str:
-    """Return the exact-match tmux target for -t flags (=name prevents prefix collisions)."""
-    return f"={tmux_name(session)}"
+    """Return the tmux target for -t flags."""
+    return tmux_name(session)
 
 
 def is_running(session: str) -> bool:
