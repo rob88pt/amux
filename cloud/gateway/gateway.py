@@ -496,6 +496,30 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         qs   = parsed.query
 
+        # ── Public: static assets (favicon — no auth required) ──
+        _ICON_PATHS = {
+            "/icon.svg": ("image/svg+xml", "/opt/amux-cloud/app/icon.svg"),
+            "/icon.png": ("image/png",     "/opt/amux-cloud/app/icon.png"),
+            "/icon-192.png": ("image/png", "/opt/amux-cloud/app/icon-192.png"),
+            "/icon-512.png": ("image/png", "/opt/amux-cloud/app/icon-512.png"),
+            "/favicon.ico": ("image/png",  "/opt/amux-cloud/app/icon.png"),
+        }
+        if path in _ICON_PATHS and self.command == "GET":
+            ct, fpath = _ICON_PATHS[path]
+            try:
+                data = open(fpath, "rb").read()
+                self.send_response(200)
+                self.send_header("Content-Type", ct)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "public, max-age=86400")
+                self.end_headers()
+                self.wfile.write(data)
+            except FileNotFoundError:
+                self.send_response(404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            return
+
         # ── Public: waitlist signup ──
         if path == "/api/waitlist" and self.command == "POST":
             length = int(self.headers.get("Content-Length", 0))

@@ -9,6 +9,10 @@ services:
     volumes:
       - amux-data:/root/.amux
       - /opt/amux-cloud/app/amux-server.py:/app/amux-server.py:ro
+      - /opt/amux-cloud/app/icon.svg:/app/icon.svg:ro
+      - /opt/amux-cloud/app/icon.png:/app/icon.png:ro
+      - /opt/amux-cloud/app/icon-192.png:/app/icon-192.png:ro
+      - /opt/amux-cloud/app/icon-512.png:/app/icon-512.png:ro
     environment:
       AMUX_PORT: "8822"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
