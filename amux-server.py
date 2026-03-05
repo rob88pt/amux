@@ -107,6 +107,11 @@ _req_tl = threading.local()  # per-request enrichment (set by handlers, read by 
 
 def _emit_event(etype: str, action: str, target: str = "", session: str = "",
                 detail: str = "", status: int = 200, ip: str = "") -> None:
+    # Don't emit semantic events (e.g. message-sent, started) for failed requests.
+    # Downgrade to a plain http event so they don't spam the event log as false positives.
+    if status >= 400 and etype != "http":
+        etype = "http"
+        action = action  # keep as-is for http type
     with _event_log_lock:
         _event_log.append({
             "ts": time.time(),
@@ -18413,7 +18418,9 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 ok, msg = send_text(name, text)
                 if ok:
                     _update_meta(name, last_send=int(time.time()))
-                return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+                # 409 = session exists but is not running (user-caused, not a server error)
+                code = 200 if ok else (409 if msg == "not running" else 500)
+                return self._json({"ok": ok, "message": msg}, code)
             if action == "keys":
                 body = self._read_body()
                 keys = body.get("keys", "")
@@ -18422,7 +18429,8 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 ok, msg = send_keys(name, keys)
                 if ok:
                     _update_meta(name, last_send=int(time.time()))
-                return self._json({"ok": ok, "message": msg}, 200 if ok else 500)
+                code = 200 if ok else (409 if msg == "not running" else 500)
+                return self._json({"ok": ok, "message": msg}, code)
             if action == "memory":
                 body = self._read_body()
                 content = body.get("content", "")
