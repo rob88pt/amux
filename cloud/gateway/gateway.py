@@ -14,6 +14,8 @@ CLERK_SECRET_KEY      = os.environ["CLERK_SECRET_KEY"]
 R2_ACCESS_KEY         = os.environ["R2_ACCESS_KEY"]
 R2_SECRET_KEY         = os.environ["R2_SECRET_KEY"]
 CF_ACCOUNT_ID         = os.environ["CF_ACCOUNT_ID"]
+R2_ENDPOINT           = f"https://{CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+R2_BUCKET             = "amux-cloud-users"
 COOKIE_SECRET         = os.environ.get("COOKIE_SECRET", "change-me")
 ANTHROPIC_API_KEY     = os.environ.get("ANTHROPIC_API_KEY", "")
 
@@ -218,6 +220,8 @@ def _write_compose(user_id, port):
     compose = (tpl
         .replace("${USER_ID}", user_id)
         .replace("${USER_PORT}", str(port))
+        .replace("${CF_ACCOUNT_ID}", CF_ACCOUNT_ID)
+        .replace("${R2_ENDPOINT}", R2_ENDPOINT)
         .replace("${R2_ACCESS_KEY}", R2_ACCESS_KEY)
         .replace("${R2_SECRET_KEY}", R2_SECRET_KEY)
         .replace("${ANTHROPIC_API_KEY}", ANTHROPIC_API_KEY))
@@ -238,8 +242,32 @@ def container_healthy(user_id):
         capture_output=True, text=True)
     return r.stdout.strip() == "healthy"
 
+def _restore_user_files(user_id):
+    """Restore ~/.amux/ files from R2 if the volume is empty (fresh server / lost volume)."""
+    vol = f"amux-data-{user_id}"
+    # Quick check: if notes/ has any files, the volume is populated — skip restore
+    check = subprocess.run(
+        ["docker", "run", "--rm", "-v", f"{vol}:/data",
+         "amazon/aws-cli:latest",
+         "sh", "-c", "ls /data/notes/ 2>/dev/null | wc -l"],
+        capture_output=True, text=True)
+    if check.stdout.strip() != "0":
+        return
+    # Volume is empty — restore from R2
+    r2_prefix = f"s3://{R2_BUCKET}/users/{user_id}/files/"
+    subprocess.run(
+        ["docker", "run", "--rm",
+         "-v", f"{vol}:/root/.amux",
+         "-e", f"AWS_ACCESS_KEY_ID={R2_ACCESS_KEY}",
+         "-e", f"AWS_SECRET_ACCESS_KEY={R2_SECRET_KEY}",
+         "amazon/aws-cli:latest",
+         "aws", "s3", "sync", r2_prefix, "/root/.amux/",
+         "--endpoint-url", R2_ENDPOINT, "--quiet"],
+        capture_output=True)
+
 def start_container(user_id, port):
     _write_compose(user_id, port)
+    _restore_user_files(user_id)
     d = _compose_dir(user_id)
     subprocess.run(["docker", "compose", "up", "-d"], cwd=d,
                    capture_output=True, check=True)

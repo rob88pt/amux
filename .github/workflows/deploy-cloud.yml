@@ -43,3 +43,26 @@ jobs:
         run: |
           rsync -e "ssh -i ~/.ssh/amux_cloud" cloud/docker/docker-compose.template.yml \
             root@5.161.66.217:/opt/amux-cloud/docker/docker-compose.template.yml
+
+      - name: Regenerate per-user compose files and apply changes
+        run: |
+          ssh -i ~/.ssh/amux_cloud root@5.161.66.217 'bash -s' << 'ENDSSH'
+            source /etc/amux/gateway.env
+            R2_ENDPOINT="https://${CF_ACCOUNT_ID}.r2.cloudflarestorage.com"
+            TEMPLATE=/opt/amux-cloud/docker/docker-compose.template.yml
+            for user_dir in /var/amux/users/*/; do
+              user_id=$(basename "$user_dir")
+              compose_file="$user_dir/docker-compose.yml"
+              port=$(grep -A1 "ports:" "$compose_file" 2>/dev/null | grep -oP "[0-9]{4,}(?=:8822)")
+              [ -z "$port" ] && continue
+              sed "s/\${USER_ID}/${user_id}/g;
+                   s/\${USER_PORT}/${port}/g;
+                   s/\${CF_ACCOUNT_ID}/${CF_ACCOUNT_ID}/g;
+                   s|\${R2_ENDPOINT}|${R2_ENDPOINT}|g;
+                   s/\${R2_ACCESS_KEY}/${R2_ACCESS_KEY}/g;
+                   s/\${R2_SECRET_KEY}/${R2_SECRET_KEY}/g;
+                   s/\${ANTHROPIC_API_KEY}/${ANTHROPIC_API_KEY}/g" \
+                "$TEMPLATE" > "$compose_file"
+              cd "$user_dir" && docker compose up -d --no-recreate 2>&1 | grep -v "^#" | tail -3
+            done
+          ENDSSH

@@ -1,5 +1,5 @@
 # Per-user docker-compose — instantiated by gateway.py
-# Variables replaced: USER_ID, USER_PORT, CF_ACCOUNT_ID, R2_ACCESS_KEY, R2_SECRET_KEY, ANTHROPIC_API_KEY
+# Variables replaced: USER_ID, USER_PORT, CF_ACCOUNT_ID, R2_ACCESS_KEY, R2_SECRET_KEY, ANTHROPIC_API_KEY, R2_ENDPOINT
 
 services:
   amux:
@@ -38,6 +38,28 @@ services:
       LITESTREAM_SECRET_ACCESS_KEY: "${R2_SECRET_KEY}"
       USER_ID: "${USER_ID}"
     command: replicate
+    depends_on:
+      amux:
+        condition: service_healthy
+
+  sync:
+    image: amazon/aws-cli:latest
+    container_name: amux-sync-${USER_ID}
+    restart: unless-stopped
+    volumes:
+      - amux-data:/root/.amux
+    environment:
+      AWS_ACCESS_KEY_ID: "${R2_ACCESS_KEY}"
+      AWS_SECRET_ACCESS_KEY: "${R2_SECRET_KEY}"
+    entrypoint: >
+      sh -c "while true; do
+        sleep 60;
+        aws s3 sync /root/.amux/ s3://amux-cloud-users/users/${USER_ID}/files/
+          --endpoint-url ${R2_ENDPOINT}
+          --exclude 'amux.db' --exclude 'amux.db-shm' --exclude 'amux.db-wal'
+          --exclude 'logs/*' --exclude 'board/*'
+          --quiet 2>&1;
+      done"
     depends_on:
       amux:
         condition: service_healthy
