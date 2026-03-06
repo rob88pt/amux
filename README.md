@@ -1,4 +1,4 @@
-<img src="github-header.svg" alt="amux — Claude Code Multiplexer" width="1280"/>
+<img src="site/github-header.svg" alt="amux — Claude Code Multiplexer" width="1280"/>
 
 **Open-source Claude Code agent multiplexer.** Run dozens of parallel AI coding agents, unattended, from your browser or phone. Self-healing watchdog, shared kanban board, agent-to-agent orchestration — no build step, no external services. Python 3 + tmux.
 
