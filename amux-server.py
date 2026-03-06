@@ -4500,6 +4500,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     -webkit-touch-callout: default; cursor: text;
     touch-action: pan-y pan-x;
   }
+  @media (max-width: 768px) {
+    .overlay-body { white-space: pre-wrap; word-break: break-word; overflow-x: hidden; touch-action: pan-y; }
+  }
   .peek-copy-btn {
     position: absolute; top: 6px; right: 6px; z-index: 10;
     height: 28px; border-radius: 6px; padding: 0 8px;
