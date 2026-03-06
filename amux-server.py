@@ -12105,20 +12105,11 @@ function _peekOpenLink(e) {
   if (!a) return;
   const href = a.href;
   if (!href || !/^https?:\/\//.test(href)) return;
-  // On desktop (click event), let the browser handle target=_blank naturally —
-  // calling preventDefault + synthetic click breaks desktop PWA where the
-  // synthetic click has no user gesture and is silently dropped.
-  if (e.type === 'click') return;
-  // On touch (touchend), use synthetic click to bypass iOS PWA popup blocker.
+  // Use window.open — works in both desktop PWA and mobile PWA (direct user gesture).
+  // target=_blank alone doesn't reliably open in the system browser in Chrome desktop PWA.
   e.preventDefault();
   e.stopPropagation();
-  const tmp = document.createElement('a');
-  tmp.href = href;
-  tmp.target = '_blank';
-  tmp.rel = 'noopener noreferrer';
-  document.body.appendChild(tmp);
-  tmp.click();
-  document.body.removeChild(tmp);
+  window.open(href, '_blank', 'noopener,noreferrer');
 }
 document.getElementById('peek-body').addEventListener('click', _peekOpenLink);
 document.getElementById('peek-body').addEventListener('touchend', _peekOpenLink, {passive: false});
@@ -12268,9 +12259,11 @@ function _pwaCb(e) {
       || document.querySelector('.card.open .send-input')
       || document.getElementById('search');
     if (!target) return false;
-    if (!navigator.clipboard?.readText) return false;
 
-    // Use clipboard API for all inputs — native paste is unreliable in Chrome desktop PWA.
+    // If the target is already focused, native Cmd+V works in Chrome desktop PWA
+    // without triggering the clipboard permission dialog. Only use clipboard.readText
+    // for unfocused targets that need manual paste redirection.
+    if (target === document.activeElement) return false;
     if (!navigator.clipboard?.readText) return false;
     e.preventDefault();
     // Try clipboard.read() first for image/file paste support in peek
