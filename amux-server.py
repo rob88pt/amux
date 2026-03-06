@@ -12053,6 +12053,8 @@ function _pwaCb(e) {
   const k = e.key.toLowerCase();
   if (k !== 'a' && k !== 'c' && k !== 'x' && k !== 'v') return false;
   const ae = document.activeElement;
+  // Let contentEditable elements (e.g. Quill editor) handle clipboard natively
+  if (ae && ae.isContentEditable) return false;
   const inp = (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) ? ae : null;
 
   // Cmd+A — select all in focused input
@@ -15903,6 +15905,17 @@ function _notesInitQuill() {
   });
   _quill.on('text-change', (delta, old, source) => {
     if (source === 'api') return;
+    // Expand @today → full date + time
+    const text = _quill.getText();
+    const atIdx = text.indexOf('@today');
+    if (atIdx !== -1) {
+      const now = new Date();
+      const stamp = now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })
+        + ' ' + now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      _quill.deleteText(atIdx, 6, 'api');
+      _quill.insertText(atIdx, stamp, 'api');
+      _quill.setSelection(atIdx + stamp.length, 0, 'api');
+    }
     // Sync H1 → title input when user edits the heading in Quill directly
     const first = _quill.root.firstElementChild;
     if (first && first.tagName === 'H1') {
