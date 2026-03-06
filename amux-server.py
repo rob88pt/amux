@@ -12167,10 +12167,10 @@ function _pwaCb(e) {
   }
 
   // Cmd+V — paste into best available input.
-  // Use Clipboard API directly — native paste events are unreliable in Chrome desktop PWAs.
+  // If the active element is already a focused input/textarea, let the native paste
+  // event fire — this avoids the macOS PWA "Paste" permission popup that triggers
+  // when calling navigator.clipboard.read/readText directly.
   if (k === 'v') {
-    if (!navigator.clipboard?.readText) return false;
-
     const peekOpen  = document.getElementById('peek-overlay')?.classList.contains('active');
     const boardOpen = document.getElementById('board-detail-overlay')?.classList.contains('active');
     const gridOpen  = document.getElementById('grid-view')?.classList.contains('active');
@@ -12180,30 +12180,34 @@ function _pwaCb(e) {
       || (gridOpen  && document.activeElement?.closest('#grid-view') && document.activeElement)
       || document.querySelector('.card.open .send-input')
       || document.getElementById('search');
-    if (target) {
-      e.preventDefault();
-      // Try clipboard.read() first for image/file paste support
-      if (peekOpen && navigator.clipboard.read) {
-        navigator.clipboard.read().then(items => {
-          for (const item of items) {
-            const imgType = item.types.find(t => t.startsWith('image/'));
-            if (imgType) {
-              item.getType(imgType).then(blob => {
-                const ext = imgType.split('/')[1] || 'png';
-                const file = new File([blob], 'pasted-image.' + ext, { type: imgType });
-                uploadAndAttach(file);
-              });
-              return;
-            }
+    if (!target) return false;
+
+    // If the target is already focused, let native paste handle it (no OS permission dialog).
+    if (target === document.activeElement) return false;
+
+    // Target is not focused — we need to redirect paste. Use clipboard API to read then insert.
+    if (!navigator.clipboard?.readText) return false;
+    e.preventDefault();
+    // Try clipboard.read() first for image/file paste support in peek
+    if (peekOpen && navigator.clipboard.read) {
+      navigator.clipboard.read().then(items => {
+        for (const item of items) {
+          const imgType = item.types.find(t => t.startsWith('image/'));
+          if (imgType) {
+            item.getType(imgType).then(blob => {
+              const ext = imgType.split('/')[1] || 'png';
+              const file = new File([blob], 'pasted-image.' + ext, { type: imgType });
+              uploadAndAttach(file);
+            });
+            return;
           }
-          // No image — fall through to text paste
-          _pasteTextInto(target);
-        }).catch(() => _pasteTextInto(target));
-      } else {
+        }
         _pasteTextInto(target);
-      }
-      return true;
+      }).catch(() => _pasteTextInto(target));
+    } else {
+      _pasteTextInto(target);
     }
+    return true;
   }
 
   return false;
