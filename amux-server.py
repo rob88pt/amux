@@ -3194,6 +3194,32 @@ def _auto_resume_sessions():
             print(f"[auto-resume] {name} failed: {e}")
 
 
+def _attach_log_streaming():
+    """Set up pipe-pane log streaming for all currently-running tmux sessions.
+
+    Called on every server startup — including os.execv reloads where tmux
+    sessions survive. For surviving sessions, this re-attaches pipe-pane so
+    logs continue streaming after a server restart/deploy.
+    """
+    CC_LOGS.mkdir(parents=True, exist_ok=True)
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+    for f in CC_SESSIONS.glob("*.env"):
+        name = f.stem
+        if not is_running(name):
+            continue
+        lp = _log_path(name)
+        try:
+            with lp.open("ab") as lf:
+                lf.write(f"\n\n=== Server restarted: {ts} ===\n\n".encode())
+        except Exception:
+            pass
+        subprocess.run(
+            ["tmux", "pipe-pane", "-t", tmux_name(name), "-o",
+             f"cat >> {shlex.quote(str(lp))}"],
+            capture_output=True, timeout=5,
+        )
+
+
 def _migrate_memory_files():
     """Startup migration: copy project-dir-keyed memory files to session-name-keyed.
 
@@ -3434,7 +3460,7 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         except Exception:
             pass
         subprocess.run(
-            ["tmux", "pipe-pane", "-t", tmux_target(name), "-o",
+            ["tmux", "pipe-pane", "-t", tmux_name(name), "-o",
              f"cat >> {shlex.quote(str(lp))}"],
             capture_output=True, timeout=5,
         )
@@ -19178,6 +19204,7 @@ def main():
     _migrate_flat_to_sqlite()
     _init_default_sessions()
     _auto_resume_sessions()
+    _attach_log_streaming()  # re-attach pipe-pane for sessions surviving os.execv
 
     # Pre-configure ~/.claude.json to skip interactive setup wizard
     _init_claude_config()
