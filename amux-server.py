@@ -4419,9 +4419,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .card-preview { color: var(--dim); font-size: 0.78rem; margin-top: 4px; margin-left: 20px; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .card-preview-lines {
     color: var(--dim); font-size: 0.75rem; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
-    white-space: pre-wrap; word-break: break-all; overflow-wrap: anywhere;
+    white-space: pre; overflow: hidden;
     background: rgba(1,4,9,0.5); border-radius: 6px; padding: 8px 10px;
-    margin-bottom: 8px; line-height: 1.4; max-height: 80px; overflow: hidden;
+    margin-bottom: 8px; line-height: 1.4; max-height: 80px;
   }
   .badges { display: flex; gap: 6px; margin-top: 6px; margin-left: 20px; flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
   .badges::-webkit-scrollbar { display: none; }
