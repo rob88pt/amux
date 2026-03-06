@@ -2919,7 +2919,11 @@ def list_sessions() -> list:
                 if len(set(cl.replace(' ', ''))) <= 2:
                     continue
                 intelligible.append(cl[:200])
-            preview_lines = intelligible[-5:] if intelligible else []
+            if intelligible:
+                preview_lines = intelligible[-5:]
+            else:
+                # Fallback: show last few non-empty stripped lines (e.g. spinner/tool output during active processing)
+                preview_lines = [strip_ansi(l).strip()[:200] for l in lines[-8:] if strip_ansi(l).strip()][-5:]
         # Detect active model from JSONL
         raw_dir = cfg.get("CC_DIR", "")
         resolved_dir = str(Path(raw_dir).expanduser().resolve()) if raw_dir else ""
