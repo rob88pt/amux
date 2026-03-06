@@ -969,16 +969,24 @@ def _log_path(session: str) -> Path:
 
 
 def save_session_log(session: str, content: str):
-    """Append new content to session log, keeping file under MAX_LOG_BYTES."""
+    """Append content to session log, trimming from the front when > MAX_LOG_BYTES."""
     if not content.strip():
         return
     lp = _log_path(session)
+    CC_LOGS.mkdir(parents=True, exist_ok=True)
     try:
-        # Write full capture each time (tmux scrollback is the source of truth)
         data = content.encode("utf-8", errors="replace")
-        if len(data) > MAX_LOG_BYTES:
-            data = data[-MAX_LOG_BYTES:]
-        lp.write_bytes(data)
+        # Trim from front if combined size would exceed limit
+        existing_size = lp.stat().st_size if lp.exists() else 0
+        if existing_size + len(data) > MAX_LOG_BYTES:
+            # Read existing, trim oldest bytes, append new
+            existing = lp.read_bytes() if lp.exists() else b""
+            combined = existing + data
+            combined = combined[-MAX_LOG_BYTES:]
+            lp.write_bytes(combined)
+        else:
+            with lp.open("ab") as f:
+                f.write(data)
     except Exception:
         pass
 
@@ -1155,9 +1163,10 @@ def _at_shell_prompt(clean_output: str) -> bool:
 
 
 def _snapshot_all_sessions():
-    """Capture scrollback for all running sessions and save to disk.
+    """Capture scrollback for health checks on all running sessions.
 
-    Also runs health checks on each session's output:
+    Session output is streamed to disk in real-time via tmux pipe-pane (set up
+    in start_session). This loop only reads output for health-check logic:
     1. Proactive: if context < 20% remaining before auto-compact, send /compact
     2. Reactive: if thinking-block corruption error detected, restart conversation
        and replay the last meaningful user message automatically.
@@ -1174,7 +1183,6 @@ def _snapshot_all_sessions():
             output = tmux_capture(name, 5000)
             if not output:
                 continue
-            save_session_log(name, output)
 
             # Strip ANSI codes for pattern matching
             clean = _STRIP_ANSI.sub("", output)
@@ -3413,6 +3421,21 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         # Force the window name back in case Claude already changed it
         subprocess.run(
             ["tmux", "rename-window", "-t", tmux_sess, name],
+            capture_output=True, timeout=5,
+        )
+        # Stream session output to log file in real-time.
+        # Appending means logs survive server restarts and new deployments.
+        CC_LOGS.mkdir(parents=True, exist_ok=True)
+        lp = _log_path(name)
+        ts = time.strftime("%Y-%m-%dT%H:%M:%S")
+        try:
+            with lp.open("ab") as _lf:
+                _lf.write(f"\n\n=== Session started: {ts} ===\n\n".encode())
+        except Exception:
+            pass
+        subprocess.run(
+            ["tmux", "pipe-pane", "-t", tmux_target(name), "-o",
+             f"cat >> {shlex.quote(str(lp))}"],
             capture_output=True, timeout=5,
         )
         meta["last_started"] = int(time.time())
@@ -6794,6 +6817,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div class="peek-dir-bar">
     <span style="flex-shrink:0;opacity:0.6;">&#x1F4C1;</span>
     <span id="peek-dir-text" onclick="peekSessionDir&&openExplore(peekSessionDir,peekSession)" title="Browse directory" style="cursor:pointer;text-decoration:underline;text-decoration-color:var(--dim);text-underline-offset:2px;"></span>
+    <span class="card-dir-edit" onclick="peekSessionDir&&_copyFileDeeplink(peekSessionDir)" title="Copy link to this directory" style="opacity:0.6;font-size:0.85rem;">&#x1F517;</span>
     <span class="card-dir-edit" id="peek-dir-edit" onclick="editField(peekSession,'dir',peekSessionDir)" title="Change directory">&#x270E;</span>
   </div>
   <!-- Terminal panel -->
@@ -7018,6 +7042,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <button class="file-view-tab" id="file-tab-edit" onclick="setFileViewMode('edit')" style="display:none;">Edit</button>
       <button class="file-view-tab" id="file-tab-raw" onclick="setFileViewMode('raw')">Raw</button>
       <button class="file-view-tab" id="file-tab-copy" onclick="copyFileContent()" title="Copy to clipboard">Copy</button>
+      <button class="file-view-tab" id="file-tab-link" onclick="_copyFileDeeplink(_fileData&&_fileData.path||'')" title="Copy deep link">Link</button>
     </div>
     <button id="file-save-btn" onclick="_fileSave()" style="display:none;">Save</button>
     <a id="file-download-btn" style="display:none;font-size:0.72rem;padding:3px 10px;border:1px solid var(--border);border-radius:6px;color:var(--accent);text-decoration:none;white-space:nowrap;flex-shrink:0;">&#x2B07; Download</a>
@@ -11281,6 +11306,12 @@ function _showFilesMenu(path, btn, type) {
   copyItem.textContent = 'Copy path';
   copyItem.onclick = () => { popup.remove(); _copyExplorePath(path); };
   popup.appendChild(copyItem);
+  // Copy link
+  const linkItem = document.createElement('button');
+  linkItem.className = 'explore-menu-item';
+  linkItem.textContent = 'Copy link';
+  linkItem.onclick = () => { popup.remove(); _copyFileDeeplink(path); };
+  popup.appendChild(linkItem);
   document.body.appendChild(popup);
   const r = btn.getBoundingClientRect();
   const pw = popup.offsetWidth || 160;
@@ -11308,6 +11339,24 @@ function _copyExplorePathFallback(path) {
   document.body.appendChild(ta); ta.focus(); ta.select();
   try { document.execCommand('copy'); } catch(e) {}
   document.body.removeChild(ta);
+}
+function _copyFileDeeplink(path) {
+  const p = new URLSearchParams(location.search);
+  p.set('path', path);
+  const url = location.origin + location.pathname + '?' + p.toString();
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(url).then(() => showToast('Link copied'), () => _copyFileDeeplinkFallback(url));
+  } else {
+    _copyFileDeeplinkFallback(url);
+  }
+}
+function _copyFileDeeplinkFallback(url) {
+  const ta = document.createElement('textarea');
+  ta.value = url; ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.appendChild(ta); ta.focus(); ta.select();
+  try { document.execCommand('copy'); } catch(e) {}
+  document.body.removeChild(ta);
+  showToast('Link copied');
 }
 async function loadExplore(path) {
   const body = document.getElementById('explore-body');
