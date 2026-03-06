@@ -16179,6 +16179,7 @@ async function _notesDelete() {
   const pathKey = _notesActive.path.replace(/\.md$/, '');
   if (localStorage.getItem('amux_last_note') === _notesActive.path) localStorage.removeItem('amux_last_note');
   _notesAllNotes = _notesAllNotes.filter(n => n.path !== _notesActive.path);
+  document.querySelector(`#notes-list .notes-list-item[data-path="${_notesActive.path}"]`)?.remove();
   _notesActive = null;
   await apiCall(API + '/api/notes/' + encodeURIComponent(pathKey), { method: 'DELETE' });
   if (_notesAllNotes.length > 0) {
