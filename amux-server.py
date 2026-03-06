@@ -1694,12 +1694,15 @@ def _init_claude_config():
     if not settings.get("skipDangerousModePermissionPrompt"):
         settings["skipDangerousModePermissionPrompt"] = True
         settings_changed = True
-    # Ensure Bash(*) is allowed so yolo sessions don't get blocked
+    # Allow all tools so sessions never get blocked on permission prompts.
+    # --dangerously-skip-permissions is rejected as root (Claude v2.1.69+),
+    # so we grant permissions via settings.json instead.
     perms = settings.setdefault("permissions", {})
     allow = perms.setdefault("allow", [])
-    if "Bash(*)" not in allow:
-        allow.append("Bash(*)")
-        settings_changed = True
+    for tool in ["Bash(*)", "Edit(*)", "Write(*)", "MultiEdit(*)", "NotebookEdit(*)"]:
+        if tool not in allow:
+            allow.append(tool)
+            settings_changed = True
     if settings_changed:
         settings_file.write_text(_json.dumps(settings, indent=2))
 
