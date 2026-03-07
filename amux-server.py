@@ -1613,6 +1613,41 @@ CREATE TABLE IF NOT EXISTS skills (
     content    TEXT NOT NULL DEFAULT '',
     updated    INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS crm_contacts (
+    id       TEXT PRIMARY KEY,
+    name     TEXT NOT NULL,
+    company  TEXT NOT NULL DEFAULT '',
+    role     TEXT NOT NULL DEFAULT '',
+    email    TEXT NOT NULL DEFAULT '',
+    linkedin TEXT NOT NULL DEFAULT '',
+    twitter  TEXT NOT NULL DEFAULT '',
+    phone    TEXT NOT NULL DEFAULT '',
+    notes    TEXT NOT NULL DEFAULT '',
+    created  INTEGER NOT NULL,
+    updated  INTEGER NOT NULL,
+    deleted  INTEGER
+);
+CREATE TABLE IF NOT EXISTS crm_tags (
+    contact_id TEXT NOT NULL,
+    tag        TEXT NOT NULL,
+    PRIMARY KEY (contact_id, tag),
+    FOREIGN KEY (contact_id) REFERENCES crm_contacts(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS crm_interactions (
+    id             TEXT PRIMARY KEY,
+    contact_id     TEXT NOT NULL,
+    date           TEXT NOT NULL,
+    type           TEXT NOT NULL DEFAULT 'other',
+    notes          TEXT NOT NULL DEFAULT '',
+    follow_up_date TEXT,
+    follow_up_note TEXT NOT NULL DEFAULT '',
+    created        INTEGER NOT NULL,
+    updated        INTEGER NOT NULL,
+    FOREIGN KEY (contact_id) REFERENCES crm_contacts(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_crm_contacts_upd ON crm_contacts(updated) WHERE deleted IS NULL;
+CREATE INDEX IF NOT EXISTS idx_crm_ix_contact   ON crm_interactions(contact_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_crm_ix_followup  ON crm_interactions(follow_up_date) WHERE follow_up_date IS NOT NULL;
 """
 
 
@@ -1755,6 +1790,32 @@ items=json.load(sys.stdin)
 for i in items: print(i.get('id',''),i.get('status',''),i.get('title',''))" ;;
       *) echo "amux board: unknown subcommand: $sub" >&2; exit 1 ;;
     esac ;;
+  crm)
+    sub="$1"; shift 2>/dev/null || true
+    case "$sub" in
+      add)
+        name="$*"
+        curl -sk -X POST -H 'Content-Type: application/json' \
+          -d "{\"name\":\"$name\"}" "$AMUX_URL/api/crm/contacts" ;;
+      log)
+        cid="$1"; shift 2>/dev/null || true; notes="$*"
+        curl -sk -X POST -H 'Content-Type: application/json' \
+          -d "{\"notes\":\"$notes\",\"date\":\"$(date +%Y-%m-%d)\",\"type\":\"other\"}" \
+          "$AMUX_URL/api/crm/contacts/$cid/interactions" ;;
+      followups|fu)
+        curl -sk "$AMUX_URL/api/crm/followups" | python3 -c "
+import json,sys
+items=json.load(sys.stdin)
+if not items: print('No pending follow-ups')
+for i in items: print(i.get('follow_up_date',''),i.get('name',''),'-',i.get('follow_up_note',''))" ;;
+      list|ls|"")
+        curl -sk "$AMUX_URL/api/crm/contacts" | python3 -c "
+import json,sys
+cs=json.load(sys.stdin)
+if not cs: print('No contacts yet')
+for c in cs: print(c.get('id',''),c.get('name',''),c.get('company',''))" ;;
+      *) echo "amux crm: unknown subcommand: $sub" >&2; exit 1 ;;
+    esac ;;
   session|sessions)
     curl -sk "$AMUX_URL/api/sessions" | python3 -c "
 import json,sys
@@ -1763,6 +1824,10 @@ for s in json.load(sys.stdin): print(s['name'], '(running)' if s.get('running') 
     echo "amux board <done|doing|todo> <ITEM_ID>  — update board item status"
     echo "amux board add <title>                  — create a new board item"
     echo "amux board list                         — list board items"
+    echo "amux crm add <name>                     — add a contact"
+    echo "amux crm log <PPL-id> <notes>           — log an interaction"
+    echo "amux crm followups                      — show upcoming follow-ups"
+    echo "amux crm list                           — list all contacts"
     echo "amux sessions                           — list sessions" ;;
   *) echo "amux: unknown command: $cmd" >&2; exit 1 ;;
 esac
@@ -6236,6 +6301,174 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .notes-new-btn { width: 32px; height: 32px; font-size: 1.3rem; }
     .notes-search-wrap input { font-size: 0.88rem; padding: 7px 10px; }
   }
+
+  /* ── CRM / People view ─────────────────────────────────────────────────── */
+  #crm-view { height: calc(100vh - 110px); display: flex; flex-direction: row; overflow: hidden; }
+  .crm-sidebar {
+    width: 240px; min-width: 180px; border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
+    background: var(--card);
+  }
+  .crm-sidebar-hdr {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px 8px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .crm-search-wrap {
+    padding: 8px 10px; flex-shrink: 0; border-bottom: 1px solid var(--border);
+  }
+  .crm-search-wrap input {
+    width: 100%; box-sizing: border-box; padding: 5px 8px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-size: 0.8rem; outline: none;
+  }
+  .crm-queue { flex-shrink: 0; border-bottom: 1px solid var(--border); }
+  .crm-queue-hdr {
+    padding: 6px 12px; font-size: 0.72rem; font-weight: 600; color: var(--dim);
+    cursor: pointer; display: flex; align-items: center; gap: 6px; user-select: none;
+  }
+  .crm-queue-hdr:hover { color: var(--text); }
+  .crm-queue-badge {
+    margin-left: auto; background: #ef4444; color: #fff;
+    border-radius: 10px; padding: 0 5px; font-size: 0.68rem;
+  }
+  .crm-queue-item {
+    padding: 5px 12px 5px 18px; font-size: 0.78rem; cursor: pointer;
+    border-left: 2px solid #a78bfa; display: flex; flex-direction: column; gap: 1px;
+  }
+  .crm-queue-item:hover { background: var(--hover); }
+  .crm-queue-item.overdue { border-left-color: #ef4444; }
+  .crm-queue-item-name { font-weight: 500; }
+  .crm-queue-item-due { font-size: 0.7rem; color: var(--dim); }
+  .crm-contact-list { flex: 1; overflow-y: auto; }
+  .crm-contact-item {
+    padding: 9px 12px; cursor: pointer; border-bottom: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .crm-contact-item:hover { background: var(--hover); }
+  .crm-contact-item.active { background: rgba(139,92,246,0.1); }
+  .crm-contact-name { font-size: 0.84rem; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+  .crm-contact-sub { font-size: 0.73rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .crm-contact-meta { display: flex; align-items: center; gap: 6px; margin-top: 2px; flex-wrap: wrap; }
+  .crm-health { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .crm-health.fresh { background: #22c55e; }
+  .crm-health.warm  { background: #f59e0b; }
+  .crm-health.cold  { background: #ef4444; }
+  .crm-health.never { background: var(--dim); }
+  .crm-days-badge { font-size: 0.7rem; color: var(--dim); }
+  .crm-fu-badge {
+    font-size: 0.68rem; padding: 1px 5px; border-radius: 3px;
+    background: rgba(139,92,246,0.15); color: #a78bfa;
+  }
+  .crm-fu-badge.overdue { background: rgba(239,68,68,0.15); color: #f87171; }
+  /* Detail pane */
+  .crm-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+  .crm-detail-empty {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; color: var(--dim); gap: 10px;
+  }
+  .crm-contact-hdr {
+    padding: 14px 20px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .crm-name-input {
+    font-size: 1.15rem; font-weight: 600; color: var(--text);
+    border: none; background: transparent; outline: none;
+    width: 100%; padding: 0; font-family: inherit;
+    border-bottom: 1px solid transparent;
+  }
+  .crm-name-input:focus { border-bottom-color: var(--accent); }
+  .crm-field-row { display: flex; gap: 14px; margin-top: 8px; flex-wrap: wrap; }
+  .crm-field { display: flex; align-items: center; gap: 4px; font-size: 0.78rem; color: var(--dim); }
+  .crm-field-input {
+    background: transparent; border: none; border-bottom: 1px solid transparent;
+    color: var(--text); font-size: 0.78rem; font-family: inherit; outline: none;
+    min-width: 80px; max-width: 180px; padding: 1px 2px;
+  }
+  .crm-field-input:focus { border-bottom-color: var(--accent); }
+  .crm-field-input::placeholder { color: var(--dim); opacity: 0.6; }
+  .crm-tags-row {
+    display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+    padding: 7px 20px; flex-shrink: 0; border-bottom: 1px solid var(--border);
+    min-height: 34px;
+  }
+  .crm-tag-chip {
+    font-size: 0.72rem; padding: 2px 8px; border-radius: 10px;
+    background: rgba(139,92,246,0.15); color: #a78bfa; cursor: pointer;
+  }
+  .crm-tag-chip:hover { background: rgba(139,92,246,0.28); text-decoration: line-through; }
+  .crm-add-tag {
+    font-size: 0.72rem; color: var(--dim); cursor: pointer; padding: 2px 7px;
+    border: 1px dashed var(--border); border-radius: 10px;
+  }
+  .crm-add-tag:hover { color: var(--text); }
+  .crm-tag-inp {
+    font-size: 0.72rem; padding: 2px 7px; border: 1px solid var(--accent);
+    border-radius: 10px; background: var(--bg); color: var(--text); outline: none; width: 90px;
+  }
+  .crm-notes-wrap { padding: 10px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  .crm-notes-label { font-size: 0.7rem; color: var(--dim); margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .crm-notes-ta {
+    width: 100%; box-sizing: border-box; background: transparent;
+    border: none; color: var(--text); font-size: 0.82rem; font-family: inherit;
+    resize: none; outline: none; min-height: 46px; max-height: 100px; line-height: 1.5;
+  }
+  .crm-notes-ta:focus { background: var(--hover); border-radius: 4px; padding: 4px; }
+  .crm-ix-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .crm-ix-hdr {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 20px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .crm-ix-list { flex: 1; overflow-y: auto; }
+  .crm-ix-item {
+    padding: 10px 20px; border-bottom: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 4px; position: relative;
+  }
+  .crm-ix-meta { display: flex; align-items: center; gap: 7px; }
+  .crm-ix-date { font-size: 0.74rem; color: var(--dim); }
+  .crm-ix-type {
+    font-size: 0.68rem; padding: 1px 6px; border-radius: 3px;
+    background: var(--border); color: var(--dim); text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .crm-ix-type.email   { background: rgba(59,130,246,0.15); color: #60a5fa; }
+  .crm-ix-type.call    { background: rgba(34,197,94,0.15);  color: #4ade80; }
+  .crm-ix-type.meeting { background: rgba(139,92,246,0.15); color: #a78bfa; }
+  .crm-ix-type.dm      { background: rgba(249,115,22,0.15); color: #fb923c; }
+  .crm-ix-type.event   { background: rgba(245,158,11,0.15); color: #fbbf24; }
+  .crm-ix-notes { font-size: 0.82rem; color: var(--text); white-space: pre-wrap; }
+  .crm-ix-fu {
+    font-size: 0.74rem; padding: 2px 7px; border-radius: 4px;
+    background: rgba(139,92,246,0.1); color: #a78bfa; align-self: flex-start;
+  }
+  .crm-ix-fu.overdue { background: rgba(239,68,68,0.1); color: #f87171; }
+  .crm-ix-del {
+    position: absolute; top: 10px; right: 14px; opacity: 0; cursor: pointer;
+    font-size: 0.75rem; color: var(--dim); padding: 2px 4px;
+  }
+  .crm-ix-item:hover .crm-ix-del { opacity: 1; }
+  /* Log interaction modal */
+  .crm-log-modal {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center; z-index: 500;
+  }
+  .crm-log-modal.open { display: flex; }
+  .crm-log-box {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px; width: 420px; max-width: 96vw; display: flex; flex-direction: column; gap: 12px;
+  }
+  .crm-log-title { font-size: 0.9rem; font-weight: 600; }
+  .crm-log-row { display: flex; gap: 10px; }
+  .crm-log-field { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+  .crm-log-field label { font-size: 0.73rem; color: var(--dim); }
+  .crm-log-field input, .crm-log-field select, .crm-log-field textarea {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-family: inherit; font-size: 0.82rem; padding: 6px 8px; outline: none;
+  }
+  .crm-log-field input:focus, .crm-log-field select:focus, .crm-log-field textarea:focus { border-color: var(--accent); }
+  .crm-log-field textarea { resize: vertical; min-height: 70px; }
+  .crm-log-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  @media (max-width: 600px) {
+    #crm-view { height: calc(100dvh - 122px); }
+    .crm-sidebar { width: 180px; min-width: 140px; }
+  }
 </style>
 </head>
 <body>
@@ -6404,6 +6637,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
   <button id="tab-email" onclick="switchView('email')">Email</button>
   <button id="tab-notes" onclick="switchView('notes')">Notes</button>
+  <button id="tab-crm" onclick="switchView('crm')">People</button>
 </div>
 <div class="tab-customize-wrap">
   <button class="tab-customize-btn" onclick="event.stopPropagation();toggleTabCustomizer()" title="Show/hide tabs">&#x229E;</button>
@@ -6771,6 +7005,89 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <div style="font-size:2rem;margin-bottom:8px;">📝</div>
       <div style="color:var(--dim);font-size:0.85rem;">Select a note or create a new one</div>
       <button class="btn" onclick="_notesNew()" style="margin-top:12px;font-size:0.8rem;">+ New Note</button>
+    </div>
+  </div>
+</div>
+
+<!-- CRM / People view -->
+<div id="crm-view" style="display:none;">
+  <!-- Sidebar -->
+  <div class="crm-sidebar">
+    <div class="crm-sidebar-hdr">
+      <span style="font-weight:600;font-size:0.85rem;">People</span>
+      <button class="notes-new-btn" onclick="_crmNew()" title="Add contact" style="font-size:1.1rem;width:26px;height:26px;">+</button>
+    </div>
+    <div class="crm-search-wrap">
+      <input type="search" id="crm-search" placeholder="Search contacts…" oninput="_crmSearch(this.value)" autocomplete="off">
+    </div>
+    <div class="crm-queue" id="crm-queue" style="display:none;">
+      <div class="crm-queue-hdr" onclick="_crmToggleQueue()">
+        <span id="crm-queue-icon">&#x25B6;</span>
+        <span>Follow-ups</span>
+        <span class="crm-queue-badge" id="crm-queue-count"></span>
+      </div>
+      <div id="crm-queue-list" style="display:none;"></div>
+    </div>
+    <div id="crm-contact-list" class="crm-contact-list"></div>
+  </div>
+  <!-- Detail pane -->
+  <div class="crm-detail" id="crm-detail">
+    <div class="crm-detail-empty" id="crm-detail-empty">
+      <div style="font-size:2.2rem;">&#x1F465;</div>
+      <div style="font-size:0.85rem;">Select a contact or add one</div>
+      <button class="btn" onclick="_crmNew()" style="margin-top:8px;font-size:0.8rem;">+ Add Contact</button>
+    </div>
+    <div id="crm-contact-form" style="display:none;flex-direction:column;overflow:hidden;flex:1;">
+      <div class="crm-contact-hdr">
+        <input id="crm-name" class="crm-name-input" placeholder="Name" oninput="_crmDirtied()" onblur="_crmAutoSave()">
+        <div class="crm-field-row">
+          <div class="crm-field"><span>&#x1F3E2;</span><input id="crm-company" class="crm-field-input" placeholder="Company" oninput="_crmDirtied()" onblur="_crmAutoSave()"></div>
+          <div class="crm-field"><span>&#x1F4BC;</span><input id="crm-role" class="crm-field-input" placeholder="Role / Title" oninput="_crmDirtied()" onblur="_crmAutoSave()"></div>
+          <div class="crm-field"><span>&#x1F4E7;</span><input id="crm-email" class="crm-field-input" placeholder="email" oninput="_crmDirtied()" onblur="_crmAutoSave()"></div>
+          <div class="crm-field"><span>&#x1F517;</span><input id="crm-linkedin" class="crm-field-input" placeholder="linkedin.com/in/…" oninput="_crmDirtied()" onblur="_crmAutoSave()"></div>
+          <div class="crm-field"><span>&#x1F4F1;</span><input id="crm-phone" class="crm-field-input" placeholder="phone" oninput="_crmDirtied()" onblur="_crmAutoSave()"></div>
+        </div>
+      </div>
+      <div class="crm-tags-row" id="crm-tags-row"></div>
+      <div class="crm-notes-wrap">
+        <div class="crm-notes-label">Context / Background</div>
+        <textarea id="crm-notes-field" class="crm-notes-ta" placeholder="Who is this person? How did you meet? What do they care about?" oninput="_crmDirtied()" onblur="_crmAutoSave()"></textarea>
+      </div>
+      <div class="crm-ix-wrap">
+        <div class="crm-ix-hdr">
+          <span style="font-size:0.85rem;font-weight:500;">Interactions</span>
+          <button class="btn primary" onclick="_crmOpenLog()" style="font-size:0.74rem;padding:4px 10px;">+ Log</button>
+        </div>
+        <div id="crm-ix-list" class="crm-ix-list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<!-- CRM log interaction modal -->
+<div class="crm-log-modal" id="crm-log-modal" onclick="if(event.target===this)_crmCloseLog()">
+  <div class="crm-log-box">
+    <div class="crm-log-title">Log Interaction</div>
+    <div class="crm-log-row">
+      <div class="crm-log-field"><label>Date</label><input type="date" id="crm-log-date"></div>
+      <div class="crm-log-field"><label>Type</label>
+        <select id="crm-log-type">
+          <option value="meeting">&#x1F91D; Meeting</option>
+          <option value="call">&#x1F4DE; Call</option>
+          <option value="email">&#x1F4E7; Email</option>
+          <option value="dm">&#x1F4AC; DM / Message</option>
+          <option value="event">&#x1F389; Event</option>
+          <option value="other">&#x1F4DD; Other</option>
+        </select>
+      </div>
+    </div>
+    <div class="crm-log-field"><label>Notes</label><textarea id="crm-log-notes" placeholder="What happened? What was discussed?"></textarea></div>
+    <div class="crm-log-row">
+      <div class="crm-log-field"><label>Follow-up date <span style="color:var(--dim)">(optional)</span></label><input type="date" id="crm-log-followup"></div>
+      <div class="crm-log-field"><label>Follow-up note</label><input type="text" id="crm-log-followup-note" placeholder="What to do?"></div>
+    </div>
+    <div class="crm-log-actions">
+      <button class="btn" onclick="_crmCloseLog()">Cancel</button>
+      <button class="btn primary" onclick="_crmSubmitLog()">Save</button>
     </div>
   </div>
 </div>
@@ -12915,6 +13232,7 @@ function switchView(view) {
   document.getElementById('logs-view').style.display = view === 'logs' ? 'flex' : 'none';
   document.getElementById('email-view').style.display = view === 'email' ? '' : 'none';
   document.getElementById('notes-view').style.display = view === 'notes' ? 'flex' : 'none';
+  document.getElementById('crm-view').style.display = view === 'crm' ? 'flex' : 'none';
   document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
   document.getElementById('tab-board').classList.toggle('active', view === 'board');
   document.getElementById('tab-calendar').classList.toggle('active', view === 'calendar');
@@ -12926,6 +13244,8 @@ function switchView(view) {
   document.getElementById('tab-logs').classList.toggle('active', view === 'logs');
   document.getElementById('tab-email').classList.toggle('active', view === 'email');
   document.getElementById('tab-notes').classList.toggle('active', view === 'notes');
+  document.getElementById('tab-crm').classList.toggle('active', view === 'crm');
+  if (view === 'crm') { if (!_crmContacts.length) _crmLoad(); else _crmRenderList(_crmContacts); }
   if (view === 'files') loadFiles(_filesPath);
   else { try { if (location.hash.startsWith('#path=')) history.replaceState({}, '', location.pathname); } catch(e) {} }
   if (view === 'reports') fetchReports();
@@ -16633,6 +16953,281 @@ async function _notesTogglePin(path) {
   _notesUpdatePinBtn();
 }
 
+// ── CRM / People ──────────────────────────────────────────────────────────────
+let _crmContacts = [];
+let _crmActiveId = null;
+let _crmDirty = false;
+let _crmSaveTimer = null;
+let _crmQueueOpen = false;
+
+function _crmHealthClass(d) {
+  if (!d) return 'never';
+  const days = Math.floor((Date.now() - new Date(d).getTime()) / 86400000);
+  return days < 30 ? 'fresh' : days < 90 ? 'warm' : 'cold';
+}
+function _crmDaysText(d) {
+  if (!d) return 'never contacted';
+  const days = Math.floor((Date.now() - new Date(d).getTime()) / 86400000);
+  if (days === 0) return 'today';
+  if (days === 1) return '1d ago';
+  if (days < 30) return days + 'd ago';
+  if (days < 365) return Math.floor(days / 30) + 'mo ago';
+  return Math.floor(days / 365) + 'yr ago';
+}
+function _crmFuInfo(fuDate) {
+  if (!fuDate) return null;
+  const today = new Date().toISOString().slice(0, 10);
+  const overdue = fuDate < today;
+  return { text: (overdue ? '⚠ ' : '→ ') + fuDate, overdue };
+}
+
+async function _crmLoad() {
+  const r = await fetch(API + '/api/crm/contacts');
+  _crmContacts = await r.json();
+  _crmRenderList(_crmContacts);
+  _crmRenderQueue(_crmContacts);
+}
+
+function _crmRenderList(contacts) {
+  const el = document.getElementById('crm-contact-list');
+  if (!contacts.length) {
+    el.innerHTML = '<div style="padding:20px;color:var(--dim);font-size:0.8rem;text-align:center;">No contacts yet</div>';
+    return;
+  }
+  el.innerHTML = contacts.map(c => {
+    const active = c.id === _crmActiveId ? ' active' : '';
+    const health = _crmHealthClass(c.last_date);
+    const sub = [c.company, c.role].filter(Boolean).join(' · ');
+    const fu = _crmFuInfo(c.next_followup);
+    return '<div class="crm-contact-item' + active + '" data-id="' + esc(c.id) + '" onclick="_crmOpenContact(this.dataset.id)">' +
+      '<div class="crm-contact-name"><span class="crm-health ' + health + '"></span>' + esc(c.name) + '</div>' +
+      (sub ? '<div class="crm-contact-sub">' + esc(sub) + '</div>' : '') +
+      '<div class="crm-contact-meta">' +
+        '<span class="crm-days-badge">' + _crmDaysText(c.last_date) + '</span>' +
+        (fu ? '<span class="crm-fu-badge' + (fu.overdue ? ' overdue' : '') + '">' + fu.text + '</span>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+function _crmRenderQueue(contacts) {
+  const today = new Date().toISOString().slice(0, 10);
+  const withFu = contacts.filter(c => c.next_followup).sort((a, b) => a.next_followup < b.next_followup ? -1 : 1);
+  const qEl = document.getElementById('crm-queue');
+  if (!withFu.length) { qEl.style.display = 'none'; return; }
+  qEl.style.display = '';
+  document.getElementById('crm-queue-count').textContent = withFu.length;
+  const listEl = document.getElementById('crm-queue-list');
+  listEl.style.display = _crmQueueOpen ? '' : 'none';
+  document.getElementById('crm-queue-icon').innerHTML = _crmQueueOpen ? '&#x25BC;' : '&#x25B6;';
+  listEl.innerHTML = withFu.map(c => {
+    const od = c.next_followup < today;
+    return '<div class="crm-queue-item' + (od ? ' overdue' : '') + '" onclick="_crmOpenContact(\'' + esc(c.id) + '\')">' +
+      '<div class="crm-queue-item-name">' + esc(c.name) + '</div>' +
+      '<div class="crm-queue-item-due">' + (od ? '⚠ ' : '') + c.next_followup + (c.next_followup_note ? ' — ' + esc(c.next_followup_note) : '') + '</div>' +
+    '</div>';
+  }).join('');
+}
+function _crmToggleQueue() { _crmQueueOpen = !_crmQueueOpen; _crmRenderQueue(_crmContacts); }
+
+async function _crmOpenContact(id) {
+  if (_crmDirty) await _crmFlushSave();
+  _crmActiveId = id;
+  document.querySelectorAll('.crm-contact-item').forEach(el => el.classList.toggle('active', el.dataset.id === id));
+  const r = await fetch(API + '/api/crm/contacts/' + encodeURIComponent(id));
+  if (!r.ok) return;
+  _crmRenderDetail(await r.json());
+}
+
+function _crmRenderDetail(c) {
+  document.getElementById('crm-detail-empty').style.display = 'none';
+  const form = document.getElementById('crm-contact-form');
+  form.style.display = 'flex';
+  document.getElementById('crm-name').value = c.name || '';
+  document.getElementById('crm-company').value = c.company || '';
+  document.getElementById('crm-role').value = c.role || '';
+  document.getElementById('crm-email').value = c.email || '';
+  document.getElementById('crm-linkedin').value = c.linkedin || '';
+  document.getElementById('crm-phone').value = c.phone || '';
+  document.getElementById('crm-notes-field').value = c.notes || '';
+  _crmDirty = false;
+  _crmRenderTagsRow(c.tags || []);
+  _crmRenderInteractions(c.interactions || []);
+}
+
+function _crmRenderTagsRow(tags) {
+  const el = document.getElementById('crm-tags-row');
+  el.innerHTML = tags.map(t =>
+    '<span class="crm-tag-chip" onclick="_crmRemoveTag(\'' + esc(t) + '\')" title="Click to remove">' + esc(t) + '</span>'
+  ).join('') + '<span class="crm-add-tag" onclick="_crmStartAddTag()">+ tag</span>';
+}
+
+function _crmStartAddTag() {
+  const el = document.getElementById('crm-tags-row');
+  const inp = document.createElement('input');
+  inp.className = 'crm-tag-inp';
+  inp.placeholder = 'tag name';
+  inp.onkeydown = async (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); await _crmAddTag(inp.value.trim()); }
+    if (e.key === 'Escape') { await _crmRefreshTags(); }
+  };
+  inp.onblur = async () => { if (inp.value.trim()) await _crmAddTag(inp.value.trim()); else await _crmRefreshTags(); };
+  const addBtn = el.querySelector('.crm-add-tag');
+  if (addBtn) el.replaceChild(inp, addBtn); else el.appendChild(inp);
+  inp.focus();
+}
+
+async function _crmRefreshTags() {
+  const r = await fetch(API + '/api/crm/contacts/' + _crmActiveId);
+  const c = await r.json();
+  _crmRenderTagsRow(c.tags || []);
+}
+
+async function _crmAddTag(tag) {
+  if (!tag || !_crmActiveId) return;
+  const r = await fetch(API + '/api/crm/contacts/' + _crmActiveId);
+  const c = await r.json();
+  const tags = [...new Set([...(c.tags || []), tag])];
+  await apiCall(API + '/api/crm/contacts/' + _crmActiveId, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags })
+  });
+  _crmRenderTagsRow(tags);
+}
+
+async function _crmRemoveTag(tag) {
+  if (!_crmActiveId) return;
+  const r = await fetch(API + '/api/crm/contacts/' + _crmActiveId);
+  const c = await r.json();
+  const tags = (c.tags || []).filter(t => t !== tag);
+  await apiCall(API + '/api/crm/contacts/' + _crmActiveId, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags })
+  });
+  _crmRenderTagsRow(tags);
+}
+
+function _crmRenderInteractions(interactions) {
+  const el = document.getElementById('crm-ix-list');
+  if (!interactions.length) {
+    el.innerHTML = '<div style="padding:20px;color:var(--dim);font-size:0.82rem;text-align:center;">No interactions logged yet.<br>Hit <strong>+ Log</strong> to record your first one.</div>';
+    return;
+  }
+  const today = new Date().toISOString().slice(0, 10);
+  el.innerHTML = interactions.map(ix => {
+    const od = ix.follow_up_date && ix.follow_up_date < today;
+    const fuText = ix.follow_up_date
+      ? (od ? '⚠ overdue: ' : '→ follow up: ') + ix.follow_up_date + (ix.follow_up_note ? ' — ' + esc(ix.follow_up_note) : '')
+      : '';
+    return '<div class="crm-ix-item">' +
+      '<div class="crm-ix-meta">' +
+        '<span class="crm-ix-date">' + ix.date + '</span>' +
+        '<span class="crm-ix-type ' + esc(ix.type) + '">' + esc(ix.type) + '</span>' +
+        '<span class="crm-ix-del" onclick="_crmDeleteIx(\'' + esc(ix.id) + '\')" title="Delete">&#x2715;</span>' +
+      '</div>' +
+      (ix.notes ? '<div class="crm-ix-notes">' + esc(ix.notes) + '</div>' : '') +
+      (fuText ? '<span class="crm-ix-fu' + (od ? ' overdue' : '') + '">' + fuText + '</span>' : '') +
+    '</div>';
+  }).join('');
+}
+
+function _crmDirtied() { _crmDirty = true; }
+
+function _crmAutoSave() {
+  if (!_crmDirty || !_crmActiveId) return;
+  if (_crmSaveTimer) clearTimeout(_crmSaveTimer);
+  _crmSaveTimer = setTimeout(_crmFlushSave, 600);
+}
+
+async function _crmFlushSave() {
+  if (_crmSaveTimer) { clearTimeout(_crmSaveTimer); _crmSaveTimer = null; }
+  if (!_crmActiveId || !_crmDirty) return;
+  _crmDirty = false;
+  const data = {
+    name: document.getElementById('crm-name').value.trim(),
+    company: document.getElementById('crm-company').value.trim(),
+    role: document.getElementById('crm-role').value.trim(),
+    email: document.getElementById('crm-email').value.trim(),
+    linkedin: document.getElementById('crm-linkedin').value.trim(),
+    phone: document.getElementById('crm-phone').value.trim(),
+    notes: document.getElementById('crm-notes-field').value.trim(),
+  };
+  if (!data.name) return;
+  await apiCall(API + '/api/crm/contacts/' + _crmActiveId, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  const c = _crmContacts.find(c => c.id === _crmActiveId);
+  if (c) Object.assign(c, data);
+  _crmRenderList(_crmContacts);
+  document.querySelectorAll('.crm-contact-item').forEach(el => el.classList.toggle('active', el.dataset.id === _crmActiveId));
+}
+
+async function _crmNew() {
+  const r = await apiCall(API + '/api/crm/contacts', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'New Contact' })
+  });
+  if (!r) return;
+  const d = await r.json();
+  await _crmLoad();
+  await _crmOpenContact(d.id);
+  setTimeout(() => { const ni = document.getElementById('crm-name'); ni.focus(); ni.select(); }, 50);
+}
+
+function _crmOpenLog() {
+  document.getElementById('crm-log-date').value = new Date().toISOString().slice(0, 10);
+  document.getElementById('crm-log-type').value = 'meeting';
+  document.getElementById('crm-log-notes').value = '';
+  document.getElementById('crm-log-followup').value = '';
+  document.getElementById('crm-log-followup-note').value = '';
+  document.getElementById('crm-log-modal').classList.add('open');
+  setTimeout(() => document.getElementById('crm-log-notes').focus(), 50);
+}
+function _crmCloseLog() { document.getElementById('crm-log-modal').classList.remove('open'); }
+
+async function _crmSubmitLog() {
+  if (!_crmActiveId) return;
+  await apiCall(API + '/api/crm/contacts/' + _crmActiveId + '/interactions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      date: document.getElementById('crm-log-date').value,
+      type: document.getElementById('crm-log-type').value,
+      notes: document.getElementById('crm-log-notes').value.trim(),
+      follow_up_date: document.getElementById('crm-log-followup').value || null,
+      follow_up_note: document.getElementById('crm-log-followup-note').value.trim(),
+    })
+  });
+  _crmCloseLog();
+  const c = await fetch(API + '/api/crm/contacts/' + _crmActiveId).then(r => r.json());
+  _crmRenderDetail(c);
+  await _crmLoad();
+  document.querySelectorAll('.crm-contact-item').forEach(el => el.classList.toggle('active', el.dataset.id === _crmActiveId));
+}
+
+async function _crmDeleteIx(id) {
+  await apiCall(API + '/api/crm/interactions/' + id, { method: 'DELETE' });
+  const c = await fetch(API + '/api/crm/contacts/' + _crmActiveId).then(r => r.json());
+  _crmRenderDetail(c);
+  await _crmLoad();
+  document.querySelectorAll('.crm-contact-item').forEach(el => el.classList.toggle('active', el.dataset.id === _crmActiveId));
+}
+
+function _crmSearch(q) {
+  if (!q.trim()) { _crmRenderList(_crmContacts); return; }
+  const lq = q.toLowerCase();
+  _crmRenderList(_crmContacts.filter(c =>
+    c.name.toLowerCase().includes(lq) ||
+    (c.company || '').toLowerCase().includes(lq) ||
+    (c.role || '').toLowerCase().includes(lq) ||
+    (c.tags || []).some(t => t.toLowerCase().includes(lq))
+  ));
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && document.getElementById('crm-log-modal').classList.contains('open')) _crmCloseLog();
+});
+
 // ── Email Events tab ──────────────────────────────────────────────────────────
 let _emailEvents = [];
 
@@ -19128,6 +19723,135 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     pass
                 db.commit()
                 return self._json({"ok": True})
+
+        # ── CRM / People ─────────────────────────────────────────────────────
+        if path == "/api/crm/contacts" or path.startswith("/api/crm/"):
+            import secrets as _csec, datetime as _dt
+            db = get_db()
+            now = int(time.time())
+            today = _dt.date.today().isoformat()
+
+            # GET /api/crm/contacts[?q=]
+            if method == "GET" and path == "/api/crm/contacts":
+                q = qs.get("q", [""])[0].strip()
+                sql = (
+                    "SELECT c.id,c.name,c.company,c.role,c.email,c.linkedin,c.twitter,c.phone,"
+                    "(SELECT date FROM crm_interactions WHERE contact_id=c.id ORDER BY date DESC LIMIT 1) AS last_date,"
+                    "(SELECT follow_up_date FROM crm_interactions WHERE contact_id=c.id AND follow_up_date IS NOT NULL ORDER BY follow_up_date ASC LIMIT 1) AS next_followup,"
+                    "(SELECT follow_up_note FROM crm_interactions WHERE contact_id=c.id AND follow_up_date IS NOT NULL ORDER BY follow_up_date ASC LIMIT 1) AS next_followup_note "
+                    "FROM crm_contacts c WHERE c.deleted IS NULL"
+                )
+                params: tuple = ()
+                if q:
+                    sql += " AND (c.name LIKE ? OR c.company LIKE ? OR c.role LIKE ?)"
+                    params = (f"%{q}%", f"%{q}%", f"%{q}%")
+                sql += " ORDER BY CASE WHEN last_date IS NULL THEN 0 ELSE 1 END DESC, last_date ASC"
+                rows = db.execute(sql, params).fetchall()
+                contacts = []
+                for r in rows:
+                    c = dict(r)
+                    c["tags"] = [row["tag"] for row in db.execute("SELECT tag FROM crm_tags WHERE contact_id=?", (c["id"],)).fetchall()]
+                    contacts.append(c)
+                return self._json(contacts)
+
+            # POST /api/crm/contacts
+            if method == "POST" and path == "/api/crm/contacts":
+                body = self._read_body()
+                name = body.get("name", "").strip()
+                if not name:
+                    return self._json({"error": "name required"}, 400)
+                cid = _next_issue_id("PPL")
+                db.execute(
+                    "INSERT INTO crm_contacts (id,name,company,role,email,linkedin,twitter,phone,notes,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (cid, name, body.get("company",""), body.get("role",""), body.get("email",""),
+                     body.get("linkedin",""), body.get("twitter",""), body.get("phone",""),
+                     body.get("notes",""), now, now)
+                )
+                for tag in body.get("tags", []):
+                    tag = tag.strip()
+                    if tag:
+                        try: db.execute("INSERT INTO crm_tags (contact_id,tag) VALUES (?,?)", (cid, tag))
+                        except Exception: pass
+                db.commit()
+                return self._json({"id": cid, "ok": True}, 201)
+
+            # GET/PATCH/DELETE /api/crm/contacts/:id
+            _m_c = re.match(r"^/api/crm/contacts/([^/]+)$", path)
+            if _m_c:
+                cid = _m_c.group(1)
+                if method == "GET":
+                    row = db.execute("SELECT * FROM crm_contacts WHERE id=? AND deleted IS NULL", (cid,)).fetchone()
+                    if not row: return self._json({"error": "not found"}, 404)
+                    c = dict(row)
+                    c["tags"] = [r["tag"] for r in db.execute("SELECT tag FROM crm_tags WHERE contact_id=?", (cid,)).fetchall()]
+                    c["interactions"] = [dict(r) for r in db.execute("SELECT * FROM crm_interactions WHERE contact_id=? ORDER BY date DESC, created DESC", (cid,)).fetchall()]
+                    return self._json(c)
+                if method == "PATCH":
+                    body = self._read_body()
+                    allowed = {"name","company","role","email","linkedin","twitter","phone","notes"}
+                    fields = {k: v for k, v in body.items() if k in allowed}
+                    if fields:
+                        set_cl = ", ".join(f"{k}=?" for k in fields)
+                        db.execute(f"UPDATE crm_contacts SET {set_cl}, updated=? WHERE id=?", [*fields.values(), now, cid])
+                    if "tags" in body:
+                        db.execute("DELETE FROM crm_tags WHERE contact_id=?", (cid,))
+                        for tag in body["tags"]:
+                            tag = tag.strip()
+                            if tag:
+                                try: db.execute("INSERT INTO crm_tags (contact_id,tag) VALUES (?,?)", (cid, tag))
+                                except Exception: pass
+                    db.commit()
+                    return self._json({"ok": True})
+                if method == "DELETE":
+                    db.execute("UPDATE crm_contacts SET deleted=? WHERE id=?", (now, cid))
+                    db.commit()
+                    return self._json({"ok": True})
+
+            # POST /api/crm/contacts/:id/interactions
+            _m_ix_c = re.match(r"^/api/crm/contacts/([^/]+)/interactions$", path)
+            if _m_ix_c and method == "POST":
+                cid = _m_ix_c.group(1)
+                body = self._read_body()
+                ix_id = _csec.token_urlsafe(10)
+                db.execute(
+                    "INSERT INTO crm_interactions (id,contact_id,date,type,notes,follow_up_date,follow_up_note,created,updated) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (ix_id, cid, body.get("date", today), body.get("type","other"),
+                     body.get("notes",""), body.get("follow_up_date") or None,
+                     body.get("follow_up_note",""), now, now)
+                )
+                db.execute("UPDATE crm_contacts SET updated=? WHERE id=?", (now, cid))
+                db.commit()
+                return self._json({"id": ix_id, "ok": True}, 201)
+
+            # PATCH/DELETE /api/crm/interactions/:id
+            _m_ix = re.match(r"^/api/crm/interactions/([^/]+)$", path)
+            if _m_ix:
+                ix_id = _m_ix.group(1)
+                if method == "PATCH":
+                    body = self._read_body()
+                    allowed_ix = {"date","type","notes","follow_up_date","follow_up_note"}
+                    fields = {k: v for k, v in body.items() if k in allowed_ix}
+                    if fields:
+                        set_cl = ", ".join(f"{k}=?" for k in fields)
+                        db.execute(f"UPDATE crm_interactions SET {set_cl}, updated=? WHERE id=?", [*fields.values(), now, ix_id])
+                        db.commit()
+                    return self._json({"ok": True})
+                if method == "DELETE":
+                    db.execute("DELETE FROM crm_interactions WHERE id=?", (ix_id,))
+                    db.commit()
+                    return self._json({"ok": True})
+
+            # GET /api/crm/followups
+            if method == "GET" and path == "/api/crm/followups":
+                rows = db.execute(
+                    "SELECT c.id,c.name,c.company,i.follow_up_date,i.follow_up_note "
+                    "FROM crm_interactions i JOIN crm_contacts c ON c.id=i.contact_id "
+                    "WHERE i.follow_up_date IS NOT NULL AND c.deleted IS NULL "
+                    "ORDER BY i.follow_up_date ASC"
+                ).fetchall()
+                return self._json([dict(r) for r in rows])
+
+            return self._json({"error": "not found"}, 404)
 
         # Session-specific routes: /api/sessions/<name>/<action>[/<subid>]
         m = re.match(r"^/api/sessions/([^/]+)(/([^/]+)(/([^/]+))?)?$", path)
