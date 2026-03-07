@@ -724,6 +724,7 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
     <div class="feat-item"><strong>Multi-pane workspace</strong> <span>-- full-screen tiled layout, each pane with its own send bar. Drag to rearrange; layout and named profiles persist.</span></div>
     <div class="feat-item"><strong>Live peek -- including stopped sessions</strong> <span>-- scroll full scrollback, search, preview files, fire quick-actions without attaching. Output snapshots to disk every 60s and survives restarts.</span></div>
     <div class="feat-item"><strong>Token tracking from JSONL</strong> <span>-- daily spend per session with cache reads broken out. Deduplicates by signature so restarts don't double-count.</span></div>
+    <div class="feat-item"><strong>People tab — personal CRM</strong> <span>-- contacts with health indicators (days since last touch), full interaction log, follow-up queue, and auto-assigned PPL-N IDs. Fully accessible via CLI: <code>amux crm list/add/log/fu</code>. Optimistic UI throughout.</span></div>
     <div class="feat-item"><strong>Kanban board with iCal sync</strong> <span>-- SQLite-backed with auto-generated keys, per-agent ownership, and custom columns. Exports iCal to S3 -- due dates appear in Google/Apple Calendar.</span></div>
     <div class="feat-item"><strong>Built-in cron -- no crontab, no systemd</strong> <span>-- schedule one-time or recurring commands in any session. Next-run computed atomically in SQLite with missed-fire recovery, delivered via tmux.</span></div>
     <div class="feat-item"><strong>Git-aware conflict detection</strong> <span>-- warns when two sessions share the same dir + branch, with a one-click helper to isolate each agent onto its own branch.</span></div>
@@ -809,6 +810,11 @@ footer { border-top: 1px solid var(--border); padding: 2.5rem 2rem; }
       <div class="api-endpoint"><span class="api-method post">POST</span><span class="api-path">/api/board</span></div>
       <div class="api-endpoint"><span class="api-method patch">PATCH</span><span class="api-path">/api/board/&lt;id&gt;</span></div>
       <div class="api-endpoint"><span class="api-method delete">DEL</span><span class="api-path">/api/board/&lt;id&gt;</span></div>
+      <div class="api-endpoint"><span class="api-method get">GET</span><span class="api-path">/api/crm/contacts</span></div>
+      <div class="api-endpoint"><span class="api-method post">POST</span><span class="api-path">/api/crm/contacts</span></div>
+      <div class="api-endpoint"><span class="api-method patch">PATCH</span><span class="api-path">/api/crm/contacts/&lt;id&gt;</span></div>
+      <div class="api-endpoint"><span class="api-method post">POST</span><span class="api-path">/api/crm/contacts/&lt;id&gt;/interactions</span></div>
+      <div class="api-endpoint"><span class="api-method get">GET</span><span class="api-path">/api/crm/followups</span></div>
       <div class="api-endpoint"><span class="api-method get">GET</span><span class="api-path">/api/events</span></div>
       <div class="api-endpoint"><span class="api-method get">GET</span><span class="api-path">/api/stats/daily</span></div>
     </div>

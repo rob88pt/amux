@@ -1,5 +1,15 @@
 [
   {
+    "hash": "7ff860a6d55b9cd955b9a16d8593164829d90bf8",
+    "short": "7ff860a",
+    "title": "People tab — contact CRM with interaction log and follow-up queue",
+    "date": "2026-03-07",
+    "type": "feat",
+    "tags": ["crm", "people", "feature"],
+    "description": "Added a People tab — a lightweight personal CRM built into amux. Contacts are stored in SQLite with fields for company, role, email, LinkedIn, phone, and rich notes. Each contact has a health indicator (green/yellow/red/never) based on days since last interaction, a full interaction log (calls, emails, meetings, DMs, events), and a follow-up queue surfaced at the top of the sidebar. New contacts get auto-assigned PPL-N IDs using the same sequence infrastructure as the board. The UI is fully optimistic with AbortController-guarded fetches and in-place list patching — no flicker, no full re-renders. Also accessible via CLI: `amux crm list`, `amux crm add`, `amux crm log`, `amux crm fu`.",
+    "video": "crm-people-tab.mp4"
+  },
+  {
     "hash": "2dc168121706eb9290b55f532803732f0a06aedf",
     "short": "2dc1681",
     "title": "Notes sidebar panel icons, offline save queuing, title sync",
