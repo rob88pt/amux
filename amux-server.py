@@ -5505,13 +5505,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .git-panel-header { display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap; }
   .git-panel-body { display:flex;flex:1;min-height:0;overflow:hidden;position:relative; }
   /* Left: collapsible dir tree (sidebar) */
-  .git-tree-panel { width:200px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto;padding:4px 0;background:var(--card);transition:transform 0.2s ease,opacity 0.2s ease; }
-  .git-tree-dir { display:flex;align-items:center;gap:5px;padding:5px 10px;font-size:0.75rem;color:var(--dim);font-weight:600;cursor:pointer;user-select:none; }
-  .git-tree-dir:hover { color:var(--text); }
-  .git-tree-dir-chevron { font-size:0.55rem;transition:transform 0.12s;flex-shrink:0; }
+  .git-tree-panel { width:200px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto;padding:4px 0;background:var(--card);transition:transform 0.2s ease,opacity 0.2s ease;position:relative; }
+  .git-tree-resize-handle { position:absolute;right:0;top:0;bottom:0;width:4px;cursor:col-resize;z-index:3;background:transparent;transition:background 0.15s; }
+  .git-tree-resize-handle:hover,.git-tree-resize-handle.dragging { background:var(--accent); }
+  .git-tree-dir { display:flex;align-items:center;gap:4px;font-size:0.75rem;color:var(--dim);font-weight:600;cursor:pointer;user-select:none;padding:4px 8px;border-radius:3px;margin:0 4px; }
+  .git-tree-dir:hover { color:var(--text);background:var(--hover); }
+  .git-tree-dir-chevron { font-size:0.5rem;transition:transform 0.12s;flex-shrink:0; }
   .git-tree-dir-chevron.open { transform:rotate(90deg); }
   .git-tree-dir-files { overflow:hidden; }
-  .git-tree-file { display:flex;align-items:center;gap:6px;padding:4px 10px 4px 20px;font-size:0.76rem;font-family:monospace;color:var(--text);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:3px;margin:0 4px;transition:background 0.1s; }
+  .git-tree-file { display:flex;align-items:center;gap:6px;font-size:0.76rem;font-family:monospace;color:var(--text);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:3px;margin:0 4px;transition:background 0.1s;padding:3px 8px; }
   .git-tree-file:hover { background:var(--hover); }
   .git-tree-file.active { background:rgba(99,102,241,0.12); }
   .git-tree-flag { font-size:0.65rem;font-weight:700;flex-shrink:0;width:10px; }
@@ -5539,6 +5541,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .git-tree-panel.collapsed {
       transform: translateX(-110%); opacity: 0; pointer-events: none;
     }
+    .git-tree-resize-handle { display: none; }
     .git-diff-viewer { width: 100%; }
     .git-diff-back-btn { display: flex !important; }
   }
@@ -7650,7 +7653,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       <!-- Two-panel body -->
       <div class="git-panel-body">
         <!-- Left: dir tree nav (collapsible sidebar) -->
-        <div class="git-tree-panel" id="peek-git-tree-panel"></div>
+        <div class="git-tree-panel" id="peek-git-tree-panel">
+          <div class="git-tree-resize-handle" id="git-tree-resize-handle"></div>
+        </div>
         <!-- Right: diff viewer -->
         <div id="peek-git-diff-viewer" class="git-diff-viewer">
           <div class="git-diff-back-btn" onclick="_gitDiffBack()">&#8592; Files</div>
@@ -9917,19 +9922,63 @@ function _renderPeekGit(d) {
   document.getElementById('peek-git-diff-empty').textContent = files.length ? 'Select a file to view diff' : 'No changes';
 }
 
+function _buildFileTree(files) {
+  // Build a recursive tree: node = { children: {name: node}, files: [fileEntry] }
+  const root = { children: {}, files: [] };
+  files.forEach(f => {
+    const parts = f.file.split('/');
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const p = parts[i];
+      if (!node.children[p]) node.children[p] = { children: {}, files: [] };
+      node = node.children[p];
+    }
+    node.files.push(f);
+  });
+  return root;
+}
+
+function _renderTreeNode(node, container, depth) {
+  const indent = depth * 12;
+  // Dirs first, sorted
+  Object.keys(node.children).sort().forEach(dirName => {
+    const child = node.children[dirName];
+    const dirEl = document.createElement('div');
+    dirEl.className = 'git-tree-dir';
+    dirEl.style.paddingLeft = (8 + indent) + 'px';
+    dirEl.innerHTML = `<span class="git-tree-dir-chevron open">&#9654;</span><span style="overflow:hidden;text-overflow:ellipsis;">${esc(dirName)}</span>`;
+    const wrap = document.createElement('div');
+    wrap.className = 'git-tree-dir-files';
+    dirEl.onclick = () => {
+      const ch = dirEl.querySelector('.git-tree-dir-chevron');
+      wrap.style.display = ch.classList.toggle('open') ? '' : 'none';
+    };
+    container.appendChild(dirEl);
+    _renderTreeNode(child, wrap, depth + 1);
+    container.appendChild(wrap);
+  });
+  // Files sorted
+  node.files.sort((a, b) => a.file.localeCompare(b.file)).forEach(f => {
+    const el = document.createElement('div');
+    el.className = 'git-tree-file';
+    el.style.paddingLeft = (8 + indent) + 'px';
+    el.dataset.file = f.file;
+    el.onclick = () => peekGitSelectFile(f.file, f.staged && !f.mixed);
+    const flag = f.statusFlag || (f.staged ? 'A' : f.added && !f.deleted ? 'A' : 'M');
+    const flagClass = flag === 'A' ? 'A' : flag === 'D' ? 'D' : flag.includes('U') ? 'uu' : 'M';
+    el.innerHTML = `<span class="git-tree-flag ${flagClass}">${esc(flag[0])}</span><span style="overflow:hidden;text-overflow:ellipsis;">${esc(f.file.split('/').pop())}</span>`;
+    container.appendChild(el);
+  });
+}
+
 function _renderGitTreePanel(files, ahead, aheadBase) {
   const treeEl = document.getElementById('peek-git-tree-panel');
+  // Preserve the resize handle
+  const handle = document.getElementById('git-tree-resize-handle');
   treeEl.innerHTML = '';
+  if (handle) treeEl.appendChild(handle);
 
-  // Group files by parent directory
-  const dirMap = {}; // dir -> [fileEntry]
-  files.forEach(f => {
-    const dir = f.file.includes('/') ? f.file.slice(0, f.file.lastIndexOf('/')) : '';
-    if (!dirMap[dir]) dirMap[dir] = [];
-    dirMap[dir].push(f);
-  });
-
-  // Commits ahead section at top
+  // Commits ahead section
   if (ahead.length) {
     const lbl = document.createElement('div');
     lbl.className = 'git-section-label';
@@ -9939,9 +9988,10 @@ function _renderGitTreePanel(files, ahead, aheadBase) {
       const [hash, ...rest] = l.split(' ');
       const el = document.createElement('div');
       el.className = 'git-tree-file';
+      el.style.paddingLeft = '8px';
       el.style.cursor = 'default';
       el.title = rest.join(' ');
-      el.innerHTML = `<span style="color:var(--dim);font-size:0.67rem;">${esc(hash.slice(0,7))}</span><span style="overflow:hidden;text-overflow:ellipsis;">${esc(rest.join(' '))}</span>`;
+      el.innerHTML = `<span style="color:var(--dim);font-size:0.67rem;flex-shrink:0;">${esc(hash.slice(0,7))}</span><span style="overflow:hidden;text-overflow:ellipsis;">${esc(rest.join(' '))}</span>`;
       treeEl.appendChild(el);
     });
   }
@@ -9953,42 +10003,39 @@ function _renderGitTreePanel(files, ahead, aheadBase) {
   lbl2.textContent = 'Changes';
   treeEl.appendChild(lbl2);
 
-  // Sort dirs: root first, then alphabetically
-  const dirs = Object.keys(dirMap).sort((a, b) => a === '' ? -1 : b === '' ? 1 : a.localeCompare(b));
-  dirs.forEach(dir => {
-    const dirFiles = dirMap[dir];
-    if (dir) {
-      // Dir header (collapsible)
-      const dirEl = document.createElement('div');
-      dirEl.className = 'git-tree-dir';
-      const shortDir = dir.split('/').pop();
-      dirEl.innerHTML = `<span class="git-tree-dir-chevron open">&#9654;</span><span style="overflow:hidden;text-overflow:ellipsis;">${esc(shortDir)}</span>`;
-      const filesWrap = document.createElement('div');
-      filesWrap.className = 'git-tree-dir-files';
-      dirEl.onclick = () => {
-        const ch = dirEl.querySelector('.git-tree-dir-chevron');
-        const open = ch.classList.toggle('open');
-        filesWrap.style.display = open ? '' : 'none';
-      };
-      treeEl.appendChild(dirEl);
-      dirFiles.forEach(f => { filesWrap.appendChild(_makeTreeFile(f)); });
-      treeEl.appendChild(filesWrap);
-    } else {
-      // Root-level files (no dir header)
-      dirFiles.forEach(f => { treeEl.appendChild(_makeTreeFile(f)); });
-    }
-  });
+  // Build and render recursive tree
+  const tree = _buildFileTree(files);
+  _renderTreeNode(tree, treeEl, 0);
+
+  // Init resize handle once
+  _initGitResize();
 }
 
-function _makeTreeFile(f) {
-  const el = document.createElement('div');
-  el.className = 'git-tree-file';
-  el.dataset.file = f.file;
-  el.onclick = () => peekGitSelectFile(f.file, f.staged && !f.mixed);
-  const flag = f.statusFlag || (f.staged ? 'A' : f.added && !f.deleted ? 'A' : 'M');
-  const flagClass = flag === 'A' ? 'A' : flag === 'D' ? 'D' : flag.includes('U') ? 'uu' : 'M';
-  el.innerHTML = `<span class="git-tree-flag ${flagClass}">${esc(flag[0])}</span>${esc(f.file.split('/').pop())}`;
-  return el;
+function _initGitResize() {
+  const handle = document.getElementById('git-tree-resize-handle');
+  const panel = document.getElementById('peek-git-tree-panel');
+  if (!handle || !panel || handle._resizeInit) return;
+  handle._resizeInit = true;
+  // Restore saved width
+  const saved = localStorage.getItem('gitTreeWidth');
+  if (saved) panel.style.width = saved + 'px';
+  handle.addEventListener('mousedown', e => {
+    const startX = e.clientX, startW = panel.offsetWidth;
+    handle.classList.add('dragging');
+    const onMove = e => {
+      const w = Math.max(120, Math.min(600, startW + (e.clientX - startX)));
+      panel.style.width = w + 'px';
+    };
+    const onUp = () => {
+      handle.classList.remove('dragging');
+      localStorage.setItem('gitTreeWidth', panel.offsetWidth);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    e.preventDefault();
+  });
 }
 
 function _gitActiveFile(file) {
