@@ -795,8 +795,18 @@ def _refresh_token_cache():
         _token_cache["timestamps"] = ts_result
         _token_cache["time"] = now
         return
+    # Only scan project dirs that registered sessions actually use
+    needed_proj_keys = set()
+    if CC_SESSIONS.is_dir():
+        for f in CC_SESSIONS.glob("*.env"):
+            cfg = parse_env_file(f)
+            raw_dir = cfg.get("CC_DIR", "")
+            if raw_dir:
+                needed_proj_keys.add(str(Path(raw_dir).expanduser().resolve()).replace("/", "-"))
     for proj_dir in projects_dir.iterdir():
         if not proj_dir.is_dir():
+            continue
+        if needed_proj_keys and proj_dir.name not in needed_proj_keys:
             continue
         # Find most recent JSONL
         jsonl_files = sorted(proj_dir.glob("*.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
@@ -5506,34 +5516,34 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .git-panel-header { display:flex;align-items:center;gap:8px;padding:8px 14px;border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap; }
   .git-panel-body { display:flex;flex:1;min-height:0;overflow:hidden;position:relative; }
   /* Left: collapsible dir tree (sidebar) */
-  .git-tree-panel { width:200px;flex-shrink:0;border-right:1px solid var(--border);overflow-y:auto;padding:4px 0;background:var(--card);transition:transform 0.2s ease,opacity 0.2s ease;position:relative; }
+  .git-tree-panel { width:200px;flex-shrink:0;border-right:1px solid #44475a;overflow-y:auto;padding:4px 0;background:#21222c;transition:transform 0.2s ease,opacity 0.2s ease;position:relative; }
   .git-tree-resize-handle { position:absolute;right:0;top:0;bottom:0;width:4px;cursor:col-resize;z-index:3;background:transparent;transition:background 0.15s; }
   .git-tree-resize-handle:hover,.git-tree-resize-handle.dragging { background:var(--accent); }
-  .git-tree-dir { display:flex;align-items:center;gap:4px;font-size:0.75rem;color:var(--dim);font-weight:600;cursor:pointer;user-select:none;padding:4px 8px;border-radius:3px;margin:0 4px; }
-  .git-tree-dir:hover { color:var(--text);background:var(--hover); }
+  .git-tree-dir { display:flex;align-items:center;gap:4px;font-size:0.75rem;color:#6272a4;font-weight:600;cursor:pointer;user-select:none;padding:4px 8px;border-radius:3px;margin:0 4px; }
+  .git-tree-dir:hover { color:#f8f8f2;background:rgba(68,71,90,0.5); }
   .git-tree-dir-chevron { font-size:0.5rem;transition:transform 0.12s;flex-shrink:0; }
   .git-tree-dir-chevron.open { transform:rotate(90deg); }
   .git-tree-dir-files { overflow:hidden; }
-  .git-tree-file { display:flex;align-items:center;gap:6px;font-size:0.76rem;font-family:monospace;color:var(--text);cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:3px;margin:0 4px;transition:background 0.1s;padding:3px 8px; }
-  .git-tree-file:hover { background:var(--hover); }
-  .git-tree-file.active { background:rgba(99,102,241,0.12); }
+  .git-tree-file { display:flex;align-items:center;gap:6px;font-size:0.76rem;font-family:monospace;color:#f8f8f2;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:3px;margin:0 4px;transition:background 0.1s;padding:3px 8px; }
+  .git-tree-file:hover { background:rgba(68,71,90,0.6); }
+  .git-tree-file.active { background:rgba(189,147,249,0.18);color:#f8f8f2; }
   .git-tree-flag { font-size:0.65rem;font-weight:700;flex-shrink:0;width:10px; }
-  .git-tree-flag.M { color:#60a5fa; } .git-tree-flag.A { color:#4ade80; }
-  .git-tree-flag.D { color:#f87171; } .git-tree-flag.uu { color:#fb923c; }
-  .git-section-label { font-size:0.67rem;text-transform:uppercase;letter-spacing:0.07em;color:var(--dim);padding:8px 10px 3px;font-weight:600; }
-  .git-no-changes { padding:16px 10px;color:var(--dim);font-size:0.8rem; }
-  /* Right: diff viewer */
-  .git-diff-viewer { flex:1;overflow:hidden;padding:0;font-family:monospace;font-size:0.78rem;line-height:1.55;display:flex;flex-direction:column;min-width:0; }
-  .git-diff-file-hdr { padding:5px 12px;font-size:0.73rem;font-family:monospace;color:var(--dim);border-bottom:1px solid var(--border);background:var(--bg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0; }
-  .git-diff-scroll { flex:1;overflow:auto; }
-  .git-diff-empty { display:flex;align-items:center;justify-content:center;flex:1;color:var(--dim);font-size:0.85rem; }
-  .git-diff-hunk { display:block;color:#a78bfa;padding:2px 12px;background:rgba(139,92,246,0.07); }
-  .git-diff-add { display:block;color:#4ade80;background:rgba(74,222,128,0.07);padding:0 12px; }
-  .git-diff-del { display:block;color:#f87171;background:rgba(248,113,113,0.07);padding:0 12px; }
-  .git-diff-ctx { display:block;color:var(--text);padding:0 12px;opacity:0.7; }
-  .git-diff-hdr { display:block;color:var(--dim);padding:2px 12px;font-weight:600;border-bottom:1px solid var(--border);background:var(--bg2); }
-  .git-diff-back-btn { display:none;align-items:center;gap:6px;padding:7px 12px;border-bottom:1px solid var(--border);font-size:0.8rem;color:var(--dim);cursor:pointer;flex-shrink:0;background:var(--card);user-select:none; }
-  .git-diff-back-btn:hover { color:var(--text); }
+  .git-tree-flag.M { color:#8be9fd; } .git-tree-flag.A { color:#50fa7b; }
+  .git-tree-flag.D { color:#ff5555; } .git-tree-flag.uu { color:#ffb86c; }
+  .git-section-label { font-size:0.67rem;text-transform:uppercase;letter-spacing:0.07em;color:#6272a4;padding:8px 10px 3px;font-weight:600; }
+  .git-no-changes { padding:16px 10px;color:#6272a4;font-size:0.8rem; }
+  /* Right: diff viewer — Dracula theme */
+  .git-diff-viewer { flex:1;overflow:hidden;padding:0;font-family:"Fira Code","SF Mono","Cascadia Code",monospace;font-size:0.78rem;line-height:1.55;display:flex;flex-direction:column;min-width:0;background:#282a36; }
+  .git-diff-file-hdr { padding:5px 12px;font-size:0.73rem;font-family:monospace;color:#8be9fd;border-bottom:1px solid #44475a;background:#21222c;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0; }
+  .git-diff-scroll { flex:1;overflow:auto;background:#282a36; }
+  .git-diff-empty { display:flex;align-items:center;justify-content:center;flex:1;color:#6272a4;font-size:0.85rem;background:#282a36; }
+  .git-diff-hunk { display:block;color:#bd93f9;padding:2px 12px;background:#2d2b45; }
+  .git-diff-add { display:block;color:#50fa7b;background:#1a3326;padding:0 12px; }
+  .git-diff-del { display:block;color:#ff5555;background:#3b1f2b;padding:0 12px; }
+  .git-diff-ctx { display:block;color:#f8f8f2;padding:0 12px;opacity:0.65; }
+  .git-diff-hdr { display:block;color:#6272a4;padding:2px 12px;font-weight:600;border-bottom:1px solid #44475a;background:#21222c; }
+  .git-diff-back-btn { display:none;align-items:center;gap:6px;padding:7px 12px;border-bottom:1px solid #44475a;font-size:0.8rem;color:#6272a4;cursor:pointer;flex-shrink:0;background:#21222c;user-select:none; }
+  .git-diff-back-btn:hover { color:#f8f8f2; }
   @media (max-width: 600px) {
     .git-tree-panel {
       position: absolute; top: 0; left: 0; bottom: 0; z-index: 5;
