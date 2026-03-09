@@ -3304,7 +3304,7 @@ def list_sessions() -> list:
             "active_model": active_model,
             "session_created": session_created,
             "task_time": task_time,
-            "task_name": _doing_tasks.get(name) or cfg.get("CC_DESC", "") or (pane_title if pane_title.lower() not in ("claude", "claude code", "bash", "zsh", "sh", "") else ""),
+            "task_name": _doing_tasks.get(name) or meta.get("last_send_text", "") or cfg.get("CC_DESC", "") or "",
             "tokens": tokens,
             "branch": cfg.get("CC_BRANCH", ""),
             "mcp": cfg.get("CC_MCP", ""),
@@ -22415,7 +22415,7 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     _ensure_memory(name, wd)
                 ok, msg = send_text(name, text)
                 if ok:
-                    _update_meta(name, last_send=int(time.time()))
+                    _update_meta(name, last_send=int(time.time()), last_send_text=text[:200])
                 # 409 = session exists but is not running (user-caused, not a server error)
                 code = 200 if ok else (409 if msg == "not running" else 500)
                 return self._json({"ok": ok, "message": msg}, code)
@@ -22905,9 +22905,15 @@ def _watch_self(server):
                 t.join(timeout=3)
                 # Close the listening socket so the new process can bind immediately
                 try:
+                    server.socket.close()
+                except Exception:
+                    pass
+                try:
                     server.server_close()
                 except Exception:
                     pass
+                # Brief pause to let OS release the socket
+                time.sleep(0.5)
                 os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception:
             pass
