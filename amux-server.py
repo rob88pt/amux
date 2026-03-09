@@ -20191,7 +20191,6 @@ class CCHandler(BaseHTTPRequestHandler):
                 _notes_version += 1
                 return self._json({"ok": True, "path": note_rel})
             if method == "PATCH":
-                global _notes_version
                 body = self._read_body()
                 new_rel = body.get("move_to", "").strip()
                 if not new_rel or ".." in new_rel:
@@ -22367,21 +22366,22 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 tracked = meta_gp.get("tracked_files", [])
                 cfg_gp = parse_env_file(env_file)
                 branch = cfg_gp.get("CC_BRANCH", "")
+                stage_instructions_branch = (
+                    "3. IMPORTANT: Only stage files YOU changed in this session — do NOT use `git add -A`. "
+                    "Use `git add <specific files>` for each file you modified.\n"
+                )
+                stage_instructions_main = (
+                    "2. IMPORTANT: Only stage files YOU changed in this session — do NOT use `git add -A`. "
+                    "Use `git add <specific files>` for each file you modified. "
+                    "Review `git diff` and only add files related to your task.\n"
+                )
                 if branch and branch != "none":
                     # Legacy branch-based flow
-                    if tracked:
-                        files_list = " ".join(f"`{f}`" for f in tracked)
-                        stage_instructions = f"3. Stage ONLY these tracked files: {files_list}\n"
-                    else:
-                        stage_instructions = (
-                            "3. IMPORTANT: Only stage files YOU changed in this session — do NOT use `git add -A`. "
-                            "Use `git add <specific files>` for each file you modified.\n"
-                        )
                     msg = (
                         f"Deploy now. Your branch is `{branch}`. Run these steps:\n"
                         f"1. `git stash` (if needed to allow checkout)\n"
                         f"2. `git checkout {branch}` and `git stash pop` (if stashed)\n"
-                        f"{stage_instructions}"
+                        f"{stage_instructions_branch}"
                         f"4. `git commit` with a good commit message summarizing YOUR changes only\n"
                         f"5. `git checkout main && git pull --ff-only origin main`\n"
                         f"6. `git merge {branch}` (resolve conflicts if any)\n"
@@ -22391,19 +22391,10 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     )
                 else:
                     # Main-based flow (default — no branch)
-                    if tracked:
-                        files_list = " ".join(f"`{f}`" for f in tracked)
-                        stage_instructions = f"2. Stage ONLY these tracked files: {files_list}\n"
-                    else:
-                        stage_instructions = (
-                            "2. IMPORTANT: Only stage files YOU changed in this session — do NOT use `git add -A`. "
-                            "Use `git add <specific files>` for each file you modified. "
-                            "Review `git diff` and only add files related to your task.\n"
-                        )
                     msg = (
                         f"Deploy now. You are on `main`. Run these steps:\n"
                         f"1. `git pull --ff-only origin main`\n"
-                        f"{stage_instructions}"
+                        f"{stage_instructions_main}"
                         f"3. `git commit` with a good commit message summarizing YOUR changes only\n"
                         f"4. `git push origin main`\n"
                         f"Do all steps now. If any step fails, fix it and continue."
@@ -22960,7 +22951,17 @@ def main():
     # Pre-configure ~/.claude.json to skip interactive setup wizard
     _init_claude_config()
 
-    server = ResilientHTTPSServer(("0.0.0.0", port), CCHandler)
+    # Retry binding in case port is in TIME_WAIT after a restart
+    for _attempt in range(10):
+        try:
+            server = ResilientHTTPSServer(("0.0.0.0", port), CCHandler)
+            break
+        except OSError as e:
+            if e.errno == 48 and _attempt < 9:  # Address already in use
+                slog(f"[startup] port {port} busy, retrying ({_attempt + 1}/10)...")
+                time.sleep(2)
+            else:
+                raise
 
     scheme = "http"
     ts_hostname = ""
