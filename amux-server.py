@@ -18603,6 +18603,7 @@ let _notesSidebarOpen = localStorage.getItem('amux_notes_sidebar') !== 'closed';
 let _notesOpenAbort = null; // AbortController for in-flight note fetches
 let _notesLoadingContent = false; // suppress text-change saves while loading note content
 let _notesMode = 'edit'; // 'edit' | 'preview'
+let _notesRawContent = ''; // raw server content for the open note (for markdown preview)
 
 function _notesPreviewBindCheckboxes(container) {
   // Make data-list=check items interactive in preview — clicking toggles Quill delta
@@ -18642,9 +18643,15 @@ function _notesSwitchMode(mode) {
   const preview = document.getElementById('notes-preview');
   if (mode === 'preview') {
     if (_quill) {
-      const html = _quill.root.innerHTML;
-      const isHtml = /<[a-z][\s\S]*>/i.test(html);
-      preview.innerHTML = isHtml ? html : (typeof marked !== 'undefined' ? marked.parse(html) : html);
+      const rawIsHtml = /<[a-z][\s\S]*>/i.test(_notesRawContent);
+      if (rawIsHtml) {
+        // Quill-authored HTML — render directly
+        preview.innerHTML = _quill.root.innerHTML;
+      } else {
+        // Plain markdown — render with marked
+        preview.innerHTML = renderMarkdown(_notesRawContent) || '<span style="color:var(--dim);font-size:0.85rem;">Empty note</span>';
+      }
+      preview.classList.add('md-content');
       _notesPreviewBindCheckboxes(preview);
     }
     preview.classList.add('active');
@@ -18982,6 +18989,7 @@ async function _notesOpen(path) {
   const data = await r.json();
 
   _notesActive = { path: data.path };
+  _notesRawContent = data.content || '';
   localStorage.setItem('amux_last_note', data.path);
   // Derive title from content H1 or filename
   const h1html = data.content.match(/<h1[^>]*>(.*?)<\/h1>/i);
@@ -19089,6 +19097,7 @@ function _notesSaveDebounce() {
 async function _notesSave() {
   if (!_notesActive || !_quill) return;
   const content = _quill.root.innerHTML === '<p><br></p>' ? '' : _quill.root.innerHTML;
+  _notesRawContent = content;
   const pathKey = _notesActive.path.replace(/\.md$/, '');
   const statusEl = document.getElementById('notes-save-status');
   const result = await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), {
