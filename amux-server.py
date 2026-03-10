@@ -23073,6 +23073,8 @@ def _watch_self(server):
         try:
             new_mtime = script.stat().st_mtime
             if new_mtime != mtime:
+                uptime = int(time.time() - _server_start_time)
+                slog(f"[restart] {script.name} changed — restarting (uptime={uptime}s, requests={_server_request_count}, threads={threading.active_count()})")
                 print(f"\n\033[33m↻ {script.name} changed — restarting...\033[0m")
                 # Shutdown with timeout — don't let stuck threads block restart
                 t = threading.Thread(target=server.shutdown, daemon=True)
@@ -23090,8 +23092,8 @@ def _watch_self(server):
                 # Brief pause to let OS release the socket
                 time.sleep(0.5)
                 os.execv(sys.executable, [sys.executable] + sys.argv)
-        except Exception:
-            pass
+        except Exception as e:
+            slog(f"[restart] watcher error: {e}")
 
 
 # ── TLS ──
@@ -23275,6 +23277,7 @@ def main():
         except Exception as e:
             print(f"\033[33m  TLS setup failed ({e}), falling back to HTTP\033[0m")
 
+    slog(f"[startup] server starting — pid={os.getpid()}, port={port}, scheme={scheme}, python={sys.version.split()[0]}")
     print(f"\033[1m\033[34mamux\033[0m web dashboard running")
     print(f"  Local:   {scheme}://localhost:{port}")
     if ts_hostname:
