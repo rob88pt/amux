@@ -274,6 +274,39 @@ def stop_container(user_id):
     d = _compose_dir(user_id)
     subprocess.run(["docker", "compose", "stop"], cwd=d, capture_output=True)
 
+def _migrate_and_stop_member_container(member_id, owner_id):
+    """Migrate session/memory files from member's container to owner's, then stop member's."""
+    member_ctr = f"amux-user-{member_id}"
+    owner_ctr = f"amux-user-{owner_id}"
+    # Check if member container exists and has data
+    r = subprocess.run(["docker", "inspect", member_ctr], capture_output=True)
+    if r.returncode != 0:
+        return  # no container to migrate from
+    # Ensure owner container is running
+    if not container_running(owner_id):
+        return
+    # Copy session files
+    tmp = f"/tmp/amux-migrate-{member_id}"
+    os.makedirs(tmp, exist_ok=True)
+    for subdir in ["sessions", "memory"]:
+        src = f"{member_ctr}:/root/.amux/{subdir}/."
+        dst = os.path.join(tmp, subdir)
+        os.makedirs(dst, exist_ok=True)
+        subprocess.run(["docker", "cp", src, dst], capture_output=True)
+        # Copy into owner container
+        for fname in os.listdir(dst):
+            fpath = os.path.join(dst, fname)
+            if os.path.isfile(fpath) and not fname.startswith("_global"):
+                subprocess.run(
+                    ["docker", "cp", fpath, f"{owner_ctr}:/root/.amux/{subdir}/{fname}"],
+                    capture_output=True)
+    # Clean up temp
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+    # Stop member's container stack
+    stop_container(member_id)
+    print(f"[invite] migrated {member_id} → {owner_id} and stopped member container", flush=True)
+
 # ── Session cookie ─────────────────────────────────────────────────────────────
 def _make_cookie(user_id):
     ts = int(time.time())
@@ -732,6 +765,11 @@ class Handler(BaseHTTPRequestHandler):
                 "INSERT OR IGNORE INTO org_members (owner_id, member_id, member_email, joined_at) "
                 "VALUES (?,?,?,?)", (owner_id, user_id, user_email, now))
             db.commit()
+            # Migrate member's session data into owner's container, then stop member's
+            try:
+                _migrate_and_stop_member_container(user_id, owner_id)
+            except Exception as e:
+                print(f"[invite] migration error for {user_id} → {owner_id}: {e}", flush=True)
             sec = self._secure_cookie_flags()
             return self._redirect(
                 self._base_url() + "/",
