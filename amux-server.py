@@ -18944,27 +18944,27 @@ async function _emailLoad() {
 
 function _gmailRenderEmpty(msg) {
   document.getElementById('gmail-messages-list').innerHTML =
-    \`<div style="color:var(--dim);font-size:0.82rem;text-align:center;padding:40px 12px;">\${esc(msg)}</div>\`;
+    `<div style="color:var(--dim);font-size:0.82rem;text-align:center;padding:40px 12px;">\${esc(msg)}</div>`;
 }
 
 function _gmailRenderNoAccounts() {
   document.getElementById('gmail-accounts-list').innerHTML = '';
   document.getElementById('gmail-labels-list').innerHTML = '';
-  document.getElementById('gmail-messages-list').innerHTML = \`
+  document.getElementById('gmail-messages-list').innerHTML = `
     <div style="color:var(--dim);font-size:0.82rem;text-align:center;padding:40px 12px;">
       No Gmail accounts connected.<br>
       <button class="btn" onclick="_gmailConnectAccount()" style="margin-top:12px;font-size:0.78rem;">+ Connect Account</button>
-    </div>\`;
+    </div>`;
 }
 
 function _gmailRenderAccountsList() {
   const el = document.getElementById('gmail-accounts-list');
-  el.innerHTML = _gmailAccounts.map(a => \`
+  el.innerHTML = _gmailAccounts.map(a => `
     <div class="gmail-account-item \${a === _gmailActiveAccount ? 'active' : ''}"
          onclick="_gmailSwitchAccount('\${esc(a)}')">
       <div class="gmail-account-dot" style="background:\${a === _gmailActiveAccount ? 'var(--accent)' : 'var(--dim)'}"></div>
       <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.78rem;">\${esc(a)}</span>
-    </div>\`).join('');
+    </div>`).join('');
 }
 
 async function _gmailLoadLabels() {
@@ -18973,12 +18973,12 @@ async function _gmailLoadLabels() {
   const data = await r.json();
   const labels = (data.labels || []).filter(l => l.type !== 'system' || ['INBOX','STARRED','SENT','DRAFTS','SPAM','TRASH'].includes(l.name));
   const el = document.getElementById('gmail-labels-list');
-  el.innerHTML = labels.map(l => \`
+  el.innerHTML = labels.map(l => `
     <div class="gmail-label-item \${l.name === _gmailActiveLabel ? 'active' : ''}"
          onclick="_gmailSwitchLabel('\${esc(l.name)}')">
       <span class="gmail-label-icon">\${_LABEL_ICONS[l.name] || '🏷️'}</span>
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">\${esc(l.name === 'INBOX' ? 'Inbox' : l.name)}</span>
-    </div>\`).join('');
+    </div>`).join('');
 }
 
 async function _gmailLoadInbox(pageToken='') {
@@ -19009,14 +19009,14 @@ async function _gmailLoadInbox(pageToken='') {
     div.dataset.threadId = m.thread_id;
     div.dataset.msgId = m.id;
     div.onclick = () => _gmailOpenThread(m.thread_id, div);
-    div.innerHTML = \`
+    div.innerHTML = `
       <div class="gmail-msg-row1">
         \${m.unread ? '<div class="gmail-unread-dot"></div>' : ''}
         <div class="gmail-msg-from">\${esc(_gmailFmtFrom(m.from))}</div>
         <div class="gmail-msg-date">\${esc(_gmailFmtDate(m.internal_date))}</div>
       </div>
       <div class="gmail-msg-subject">\${esc(m.subject)}</div>
-      <div class="gmail-msg-snippet">\${esc(m.snippet)}</div>\`;
+      <div class="gmail-msg-snippet">\${esc(m.snippet)}</div>`;
     frag.appendChild(div);
   });
   list.appendChild(frag);
@@ -19053,12 +19053,12 @@ async function _gmailOpenThread(threadId, itemEl) {
   const msgs = data.messages || [];
   // Subject from first message
   const subj = msgs[0]?.subject || '(no subject)';
-  document.getElementById('gmail-thread-subject').innerHTML = \`
+  document.getElementById('gmail-thread-subject').innerHTML = `
     <div style="display:flex;align-items:center;gap:8px;">
       <button class="btn" onclick="_gmailCloseThread()" style="font-size:0.72rem;padding:2px 8px;display:none;" id="gmail-back-btn">← Back</button>
       <span style="flex:1;">\${esc(subj)}</span>
       <button class="btn" onclick="_gmailShowReply()" style="font-size:0.75rem;padding:3px 10px;">Reply</button>
-    </div>\`;
+    </div>`;
   // Show back button on mobile
   if (window.innerWidth <= 768) document.getElementById('gmail-back-btn').style.display = '';
   // Store last message id for reply threading
@@ -19071,18 +19071,18 @@ async function _gmailOpenThread(threadId, itemEl) {
     card.className = 'gmail-msg-card' + (collapsed ? ' collapsed' : '');
     const body = msg.html_body || msg.text_body.replace(/\\n/g, '<br>') || '(empty)';
     const bodyHtml = msg.html_body
-      ? \`<iframe srcdoc="\${body.replace(/"/g,'&quot;')}" style="min-height:200px;max-height:600px;" onload="this.style.height=(this.contentDocument.body.scrollHeight+20)+'px'"></iframe>\`
-      : \`<div style="white-space:pre-wrap;word-break:break-word;">\${esc(msg.text_body || '(empty)')}</div>\`;
-    card.innerHTML = \`
+      ? `<iframe srcdoc="\${body.replace(/"/g,'&quot;')}" style="min-height:200px;max-height:600px;" onload="this.style.height=(this.contentDocument.body.scrollHeight+20)+'px'"></iframe>`
+      : `<div style="white-space:pre-wrap;word-break:break-word;">\${esc(msg.text_body || '(empty)')}</div>`;
+    card.innerHTML = `
       <div class="gmail-msg-card-header" onclick="this.closest('.gmail-msg-card').classList.toggle('collapsed')">
         <span class="gmail-msg-card-from">\${esc(_gmailFmtFrom(msg.from))} \u2192 \${esc(msg.to)}</span>
         <span class="gmail-msg-card-date">\${esc(_gmailFmtDate(msg.internal_date))}</span>
       </div>
-      <div class="gmail-msg-card-body">\${bodyHtml}</div>\`;
+      <div class="gmail-msg-card-body">\${bodyHtml}</div>`;
     container.appendChild(card);
   });
   // Mark as read in list
-  const listItem = document.querySelector(\`.gmail-msg-item[data-thread-id="\${threadId}"]\`);
+  const listItem = document.querySelector(`.gmail-msg-item[data-thread-id="\${threadId}"]`);
   if (listItem) { listItem.classList.remove('unread'); listItem.querySelector('.gmail-unread-dot')?.remove(); }
 }
 
@@ -19138,7 +19138,7 @@ async function _gmailSendReply() {
 function _gmailCompose() {
   if (!_gmailActiveAccount) { showAlert('Connect a Gmail account first'); return; }
   _modalResolve = null;
-  document.getElementById('modal-msg').innerHTML = \`
+  document.getElementById('modal-msg').innerHTML = `
     <div style="text-align:left;width:100%;max-width:480px;">
       <div style="font-size:0.95rem;font-weight:700;margin-bottom:12px;">New Email</div>
       <div style="display:flex;flex-direction:column;gap:8px;">
@@ -19147,10 +19147,10 @@ function _gmailCompose() {
         <textarea id="compose-body" placeholder="Message body" rows="8" style="width:100%;box-sizing:border-box;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;outline:none;resize:vertical;font-family:inherit;"></textarea>
         <div style="font-size:0.72rem;color:var(--dim);">From: \${esc(_gmailActiveAccount)}</div>
       </div>
-    </div>\`;
-  document.getElementById('modal-btns').innerHTML = \`
+    </div>`;
+  document.getElementById('modal-btns').innerHTML = `
     <button class="btn" onclick="_modalClose(false)">Cancel</button>
-    <button class="btn primary" onclick="_gmailSendCompose()">Send</button>\`;
+    <button class="btn primary" onclick="_gmailSendCompose()">Send</button>`;
   document.getElementById('modal-backdrop').classList.add('open');
 }
 
@@ -19223,7 +19223,7 @@ async function _gmailConnectAccount() {
   // Open in new tab and show code entry dialog
   window.open(authUrl, '_blank');
   _modalResolve = null;
-  document.getElementById('modal-msg').innerHTML = \`
+  document.getElementById('modal-msg').innerHTML = `
     <div style="text-align:left;max-width:420px;">
       <div style="font-weight:700;margin-bottom:8px;">Connect \${esc(account)}</div>
       <p style="font-size:0.82rem;color:var(--dim);margin:0 0 12px;">
@@ -19232,10 +19232,10 @@ async function _gmailConnectAccount() {
       </p>
       <input id="gmail-auth-code" type="text" placeholder="Paste code here" autocomplete="off"
         style="width:100%;box-sizing:border-box;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;outline:none;font-family:monospace;">
-    </div>\`;
-  document.getElementById('modal-btns').innerHTML = \`
+    </div>`;
+  document.getElementById('modal-btns').innerHTML = `
     <button class="btn" onclick="_modalClose(false)">Cancel</button>
-    <button class="btn primary" onclick="_gmailSubmitCode('\${esc(account)}')">Connect</button>\`;
+    <button class="btn primary" onclick="_gmailSubmitCode('\${esc(account)}')">Connect</button>`;
   document.getElementById('modal-backdrop').classList.add('open');
 }
 
