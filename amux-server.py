@@ -56,6 +56,7 @@ CC_NOTES = CC_HOME / "notes"
 CC_NOTES_PINS = CC_HOME / "notes" / ".pins.json"
 CC_MAP = CC_HOME / "map.json"
 CC_TRANSCRIPTS = CC_HOME / "transcripts"  # per-session JSONL backups
+CC_GMAIL = CC_HOME / "gmail-tokens"        # per-account Gmail OAuth tokens
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
@@ -63,6 +64,7 @@ CC_BOARD_DIR.mkdir(parents=True, exist_ok=True)
 CC_UPLOADS.mkdir(parents=True, exist_ok=True)
 CC_NOTES.mkdir(parents=True, exist_ok=True)
 CC_TRANSCRIPTS.mkdir(parents=True, exist_ok=True)
+CC_GMAIL.mkdir(parents=True, exist_ok=True)
 
 UPLOAD_ALLOWED_EXTS = None  # None = allow all file types
 UPLOAD_MAX_BYTES = 20 * 1024 * 1024  # 20 MB
@@ -4679,6 +4681,293 @@ def _email_sync_job() -> None:
         slog(f"[email] sync error: {e}")
 
 
+# ── Gmail API ─────────────────────────────────────────────────────────────────
+# OAuth client: uses gcloud application default client (installed app type)
+# Users can override by placing their own credentials at ~/.amux/gmail-oauth-client.json
+_GMAIL_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/userinfo.email",
+]
+_GMAIL_DEFAULT_CLIENT = {
+    "installed": {
+        "client_id": "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com",
+        "client_secret": "d-FL95Q19q7MQmFpd7hHD0Ty",
+        "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"],
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+}
+
+def _gmail_client_config() -> dict:
+    """Load custom OAuth client config or fall back to default."""
+    custom = CC_HOME / "gmail-oauth-client.json"
+    if custom.exists():
+        try:
+            return json.loads(custom.read_text())
+        except Exception:
+            pass
+    return _GMAIL_DEFAULT_CLIENT
+
+
+def _gmail_token_path(account: str) -> Path:
+    return CC_GMAIL / f"{account}.json"
+
+
+def _gmail_load_creds(account: str):
+    """Load and auto-refresh OAuth credentials for an account. Returns Credentials or None."""
+    p = _gmail_token_path(account)
+    if not p.exists():
+        return None
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        data = json.loads(p.read_text())
+        cfg = _gmail_client_config().get("installed", _gmail_client_config().get("web", {}))
+        creds = Credentials(
+            token=data.get("token"),
+            refresh_token=data.get("refresh_token"),
+            token_uri=data.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=data.get("client_id") or cfg.get("client_id", ""),
+            client_secret=data.get("client_secret") or cfg.get("client_secret", ""),
+            scopes=_GMAIL_SCOPES,
+        )
+        if not creds.valid:
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                p.write_text(json.dumps({
+                    "token": creds.token, "refresh_token": creds.refresh_token,
+                    "token_uri": creds.token_uri, "client_id": creds.client_id,
+                    "client_secret": creds.client_secret,
+                }))
+            else:
+                return None
+        return creds
+    except Exception as e:
+        slog(f"[gmail] load_creds {account}: {e}")
+        return None
+
+
+def _gmail_service(account: str):
+    """Build a Gmail API service client for account."""
+    try:
+        from googleapiclient.discovery import build
+        creds = _gmail_load_creds(account)
+        if not creds:
+            return None
+        return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    except Exception as e:
+        slog(f"[gmail] build_service {account}: {e}")
+        return None
+
+
+def _gmail_auth_url(account: str) -> str:
+    """Generate OAuth authorization URL (OOB flow — user pastes code back)."""
+    from google_auth_oauthlib.flow import Flow
+    flow = Flow.from_client_config(
+        _gmail_client_config(), _GMAIL_SCOPES,
+        redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+    )
+    url, _ = flow.authorization_url(
+        access_type="offline", prompt="consent",
+        login_hint=account, include_granted_scopes="true"
+    )
+    return url
+
+
+def _gmail_exchange_code(account: str, code: str) -> tuple[bool, str]:
+    """Exchange authorization code for tokens; save to disk."""
+    try:
+        from google_auth_oauthlib.flow import Flow
+        flow = Flow.from_client_config(
+            _gmail_client_config(), _GMAIL_SCOPES,
+            redirect_uri="urn:ietf:wg:oauth:2.0:oob"
+        )
+        flow.fetch_token(code=code.strip())
+        creds = flow.credentials
+        _gmail_token_path(account).write_text(json.dumps({
+            "token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_uri": creds.token_uri,
+            "client_id": creds.client_id,
+            "client_secret": creds.client_secret,
+        }))
+        return True, ""
+    except Exception as e:
+        slog(f"[gmail] exchange_code {account}: {e}")
+        return False, str(e)
+
+
+def _gmail_connected_accounts() -> list:
+    """List Gmail accounts that have stored tokens."""
+    if not CC_GMAIL.is_dir():
+        return []
+    return sorted(p.stem for p in CC_GMAIL.glob("*.json"))
+
+
+def _gmail_decode_body(payload: dict) -> tuple[str, str]:
+    """Extract (html_body, text_body) from a message payload, recursively."""
+    import base64
+    mime = payload.get("mimeType", "")
+    def _decode(data):
+        if not data:
+            return ""
+        return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+
+    if mime == "text/html":
+        return _decode(payload.get("body", {}).get("data", "")), ""
+    if mime == "text/plain":
+        return "", _decode(payload.get("body", {}).get("data", ""))
+
+    html, text = "", ""
+    for part in payload.get("parts", []):
+        h, t = _gmail_decode_body(part)
+        if h and not html:
+            html = h
+        if t and not text:
+            text = t
+    return html, text
+
+
+def _gmail_list_messages(account: str, label: str = "INBOX",
+                          page_token: str = "", q: str = "",
+                          max_results: int = 50) -> dict:
+    """List message summaries (headers only) for account/label."""
+    try:
+        svc = _gmail_service(account)
+        if not svc:
+            return {"error": "not_connected"}
+        kwargs: dict = {"userId": "me", "maxResults": max_results}
+        if q:
+            kwargs["q"] = q
+        else:
+            kwargs["labelIds"] = [label]
+        if page_token:
+            kwargs["pageToken"] = page_token
+        result = svc.users().messages().list(**kwargs).execute()
+        msgs = result.get("messages", [])
+        page_next = result.get("nextPageToken", "")
+        summaries = []
+        for m in msgs:
+            try:
+                hdr = svc.users().messages().get(
+                    userId="me", id=m["id"], format="metadata",
+                    metadataHeaders=["From", "To", "Subject", "Date"],
+                ).execute()
+                h = {hd["name"]: hd["value"] for hd in hdr.get("payload", {}).get("headers", [])}
+                lids = hdr.get("labelIds", [])
+                summaries.append({
+                    "id": m["id"],
+                    "thread_id": hdr.get("threadId", m["id"]),
+                    "from": h.get("From", ""),
+                    "to": h.get("To", ""),
+                    "subject": h.get("Subject", "(no subject)"),
+                    "date": h.get("Date", ""),
+                    "snippet": hdr.get("snippet", ""),
+                    "unread": "UNREAD" in lids,
+                    "starred": "STARRED" in lids,
+                    "internal_date": int(hdr.get("internalDate", 0)),
+                })
+            except Exception:
+                pass
+        return {"messages": summaries, "next_page_token": page_next}
+    except Exception as e:
+        slog(f"[gmail] list_messages {account}: {e}")
+        return {"error": str(e)}
+
+
+def _gmail_get_thread(account: str, thread_id: str) -> dict:
+    """Fetch full thread with decoded message bodies."""
+    try:
+        svc = _gmail_service(account)
+        if not svc:
+            return {"error": "not_connected"}
+        thread = svc.users().threads().get(userId="me", id=thread_id, format="full").execute()
+        messages = []
+        unread_ids = []
+        for msg in thread.get("messages", []):
+            payload = msg.get("payload", {})
+            headers = {hd["name"]: hd["value"] for hd in payload.get("headers", [])}
+            html_body, text_body = _gmail_decode_body(payload)
+            lids = msg.get("labelIds", [])
+            if "UNREAD" in lids:
+                unread_ids.append(msg["id"])
+            messages.append({
+                "id": msg["id"],
+                "thread_id": msg.get("threadId", ""),
+                "from": headers.get("From", ""),
+                "to": headers.get("To", ""),
+                "cc": headers.get("Cc", ""),
+                "subject": headers.get("Subject", "(no subject)"),
+                "date": headers.get("Date", ""),
+                "message_id_header": headers.get("Message-ID", ""),
+                "html_body": html_body,
+                "text_body": text_body,
+                "unread": "UNREAD" in lids,
+                "labels": lids,
+                "internal_date": int(msg.get("internalDate", 0)),
+            })
+        # Mark all as read in one batch
+        if unread_ids:
+            try:
+                for uid in unread_ids:
+                    svc.users().messages().modify(
+                        userId="me", id=uid,
+                        body={"removeLabelIds": ["UNREAD"]}
+                    ).execute()
+            except Exception:
+                pass
+        return {"thread_id": thread_id, "messages": messages}
+    except Exception as e:
+        slog(f"[gmail] get_thread {account}: {e}")
+        return {"error": str(e)}
+
+
+def _gmail_send_message(account: str, to: str, subject: str, body: str,
+                         reply_msg_id: str = "", thread_id: str = "") -> dict:
+    """Send a new email or reply to an existing thread."""
+    import base64
+    from email.mime.text import MIMEText
+    try:
+        svc = _gmail_service(account)
+        if not svc:
+            return {"error": "not_connected"}
+        msg = MIMEText(body, "plain", "utf-8")
+        msg["To"] = to
+        msg["From"] = account
+        msg["Subject"] = subject
+        if reply_msg_id:
+            msg["In-Reply-To"] = reply_msg_id
+            msg["References"] = reply_msg_id
+        raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+        send_body: dict = {"raw": raw}
+        if thread_id:
+            send_body["threadId"] = thread_id
+        result = svc.users().messages().send(userId="me", body=send_body).execute()
+        return {"ok": True, "id": result.get("id"), "thread_id": result.get("threadId")}
+    except Exception as e:
+        slog(f"[gmail] send {account}: {e}")
+        return {"error": str(e)}
+
+
+def _gmail_list_labels(account: str) -> list:
+    """Return sorted label list for account."""
+    try:
+        svc = _gmail_service(account)
+        if not svc:
+            return []
+        labels = svc.users().labels().list(userId="me").execute().get("labels", [])
+        # Show INBOX, STARRED, SENT, DRAFTS, SPAM, TRASH first; then user labels alphabetically
+        PRIO = ["INBOX", "STARRED", "SENT", "DRAFTS", "SPAM", "TRASH"]
+        def _key(l):
+            n = l.get("name", "")
+            return (0, PRIO.index(n)) if n in PRIO else (1, n.lower())
+        return sorted(labels, key=_key)
+    except Exception as e:
+        slog(f"[gmail] list_labels {account}: {e}")
+        return []
+
+
 RELEASE_NOTES_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6949,6 +7238,112 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     .notes-search-wrap input { font-size: 0.88rem; padding: 7px 10px; }
   }
 
+  /* ── Gmail / Email view ─────────────────────────────────────────────────── */
+  #email-view { flex-direction: row !important; }
+  #email-view.gmail-sidebar-collapsed .gmail-sidebar { width: 0; min-width: 0; border-right: none; overflow: hidden; }
+  #email-view.gmail-sidebar-collapsed #gmail-expand-btn { display: flex !important; }
+  .gmail-sidebar {
+    width: 200px; min-width: 160px; border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
+    background: var(--card); transition: width 0.2s ease, min-width 0.2s ease, border 0.2s ease;
+  }
+  .gmail-sidebar.collapsed { width: 0; min-width: 0; border-right: none; }
+  .gmail-sidebar-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 12px 6px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .gmail-accounts-list { flex-shrink: 0; border-bottom: 1px solid var(--border); }
+  .gmail-account-item {
+    display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+    cursor: pointer; font-size: 0.8rem; color: var(--text);
+    border-bottom: 1px solid rgba(139,148,158,0.08);
+    transition: background 0.1s; touch-action: manipulation; user-select: none;
+  }
+  .gmail-account-item:hover { background: rgba(139,148,158,0.08); }
+  .gmail-account-item.active { background: rgba(88,166,255,0.12); color: var(--accent); font-weight: 500; }
+  .gmail-account-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0;
+  }
+  .gmail-labels-list { flex: 1; overflow-y: auto; }
+  .gmail-label-item {
+    display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+    cursor: pointer; font-size: 0.78rem; color: var(--text);
+    transition: background 0.1s; touch-action: manipulation; user-select: none;
+  }
+  .gmail-label-item:hover { background: rgba(139,148,158,0.08); }
+  .gmail-label-item.active { background: rgba(88,166,255,0.12); color: var(--accent); font-weight: 500; }
+  .gmail-label-icon { width: 14px; text-align: center; flex-shrink: 0; font-size: 0.8rem; }
+  .gmail-list-pane {
+    width: 280px; min-width: 220px; flex-shrink: 0; display: flex;
+    flex-direction: column; border-right: 1px solid var(--border); overflow: hidden;
+  }
+  .gmail-list-toolbar {
+    display: flex; align-items: center; gap: 6px; padding: 6px 10px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .gmail-search-input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 8px; font-size: 0.78rem; color: var(--text); outline: none;
+  }
+  .gmail-search-input:focus { border-color: var(--accent); }
+  .gmail-messages-list { flex: 1; overflow-y: auto; }
+  .gmail-msg-item {
+    padding: 9px 12px; cursor: pointer; border-bottom: 1px solid rgba(139,148,158,0.08);
+    transition: background 0.1s; touch-action: manipulation; user-select: none;
+  }
+  .gmail-msg-item:hover { background: rgba(139,148,158,0.07); }
+  .gmail-msg-item.active { background: rgba(88,166,255,0.1); }
+  .gmail-msg-from { font-size: 0.8rem; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gmail-msg-item.unread .gmail-msg-from { color: var(--accent); }
+  .gmail-msg-subject { font-size: 0.75rem; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+  .gmail-msg-snippet { font-size: 0.7rem; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+  .gmail-msg-date { font-size: 0.68rem; color: var(--dim); flex-shrink: 0; margin-left: auto; }
+  .gmail-msg-row1 { display: flex; align-items: center; gap: 6px; }
+  .gmail-unread-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+  .gmail-detail-pane { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+  .gmail-detail-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .gmail-thread-subject {
+    font-size: 1rem; font-weight: 700; padding: 12px 16px 8px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0; line-height: 1.4;
+  }
+  .gmail-thread-messages { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 12px; }
+  .gmail-msg-card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden;
+  }
+  .gmail-msg-card-header {
+    display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+    cursor: pointer; border-bottom: 1px solid var(--border-subtle, rgba(128,128,128,.1));
+  }
+  .gmail-msg-card-from { font-size: 0.82rem; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gmail-msg-card-date { font-size: 0.7rem; color: var(--dim); flex-shrink: 0; }
+  .gmail-msg-card-body { padding: 12px 14px; font-size: 0.82rem; line-height: 1.6; overflow-x: auto; }
+  .gmail-msg-card-body iframe { width: 100%; border: none; background: white; border-radius: 4px; }
+  .gmail-msg-card.collapsed .gmail-msg-card-body { display: none; }
+  .gmail-reply-box { padding: 10px 14px; border-top: 1px solid var(--border); flex-shrink: 0; background: var(--bg); }
+  .gmail-reply-textarea {
+    width: 100%; box-sizing: border-box; background: var(--card); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; font-size: 0.82rem; color: var(--text);
+    resize: vertical; min-height: 80px; font-family: inherit; outline: none;
+  }
+  .gmail-reply-textarea:focus { border-color: var(--accent); }
+  .gmail-detail-actions { display: flex; gap: 6px; padding: 8px 16px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+  /* Mobile gmail layout */
+  @media (max-width: 768px) {
+    #email-view { position: relative; }
+    .gmail-sidebar { position: absolute; left: 0; top: 0; bottom: 0; z-index: 10; width: 200px !important; box-shadow: 2px 0 8px rgba(0,0,0,0.2); }
+    .gmail-sidebar.collapsed { width: 0 !important; box-shadow: none; }
+    .gmail-list-pane { width: 100%; min-width: 0; border-right: none; }
+    .gmail-detail-pane { display: none; position: absolute; inset: 0; z-index: 5; background: var(--bg); }
+    .gmail-detail-pane.mobile-open { display: flex; }
+  }
+  @media (max-width: 480px) {
+    .gmail-list-pane { min-width: 0; width: 100%; }
+    .gmail-thread-subject { font-size: 0.9rem; padding: 10px 12px 6px; }
+    .gmail-thread-messages { padding: 8px 10px; }
+    .gmail-msg-card-body { font-size: 0.78rem; padding: 10px 12px; }
+  }
+
   /* ── CRM / People view ─────────────────────────────────────────────────── */
   #crm-view { height: calc(100vh - 110px); display: flex; flex-direction: row; overflow: hidden; }
   #crm-view.sidebar-collapsed .crm-sidebar { width: 0; min-width: 0; border-right: none; overflow: hidden; }
@@ -7522,28 +7917,62 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- Email events view -->
-<div id="email-view" style="display:none;">
-  <div style="padding:10px 12px 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-    <span style="font-weight:600;font-size:0.85rem;color:var(--text);">Email Events</span>
-    <div style="flex:1;"></div>
-    <span id="email-last-sync" style="font-size:0.72rem;color:var(--dim);"></span>
-    <button class="btn" id="email-sync-btn" onclick="_emailSync()" style="font-size:0.78rem;padding:4px 10px;">&#x21BB; Sync Now</button>
+<div id="email-view" style="display:none;flex-direction:row;overflow:hidden;height:calc(100vh - 110px);">
+  <!-- Gmail Sidebar: accounts + labels -->
+  <div class="gmail-sidebar" id="gmail-sidebar">
+    <div class="gmail-sidebar-header">
+      <span style="font-weight:600;font-size:0.85rem;">Email</span>
+      <div style="display:flex;gap:4px;align-items:center;">
+        <button class="notes-new-btn" onclick="_gmailCompose()" title="Compose new email">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+        </button>
+        <button class="notes-toggle-btn" onclick="_gmailToggleSidebar()" title="Collapse sidebar">
+          <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg>
+        </button>
+      </div>
+    </div>
+    <div id="gmail-accounts-list" class="gmail-accounts-list"></div>
+    <div id="gmail-labels-list" class="gmail-labels-list"></div>
+    <div style="padding:8px 10px;border-top:1px solid var(--border);flex-shrink:0;">
+      <button class="btn" onclick="_gmailConnectAccount()" style="width:100%;font-size:0.75rem;padding:4px 0;">+ Connect Account</button>
+    </div>
   </div>
-  <div style="margin:0 12px 8px;padding:8px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:0.78rem;color:var(--dim);line-height:1.6;">
-    Reads all accounts in <strong style="color:var(--text);">Mail.app</strong>, detects event/ticket emails with AI, and adds them to <strong style="color:var(--text);">Calendar.app</strong> (which syncs to Google Calendar automatically). No OAuth setup needed.
-    <span style="display:block;margin-top:4px;">Optional: set <code style="color:var(--accent);">AMUX_CALENDAR_NAME</code> in <code>~/.amux/server.env</code> to target a specific calendar. Default: first writable calendar.</span>
+  <!-- Email list pane -->
+  <div class="gmail-list-pane" id="gmail-list-pane">
+    <div class="gmail-list-toolbar">
+      <button class="notes-expand-btn" id="gmail-expand-btn" onclick="_gmailToggleSidebar()" title="Show sidebar" style="display:none;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg>
+      </button>
+      <input id="gmail-search" type="search" placeholder="Search email&#x2026;" class="gmail-search-input"
+        oninput="_gmailSearchDebounce()" autocomplete="off" autocorrect="off">
+      <button class="notes-new-btn" onclick="_gmailRefreshInbox()" title="Refresh">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+      </button>
+    </div>
+    <div id="gmail-messages-list" class="gmail-messages-list"></div>
+    <div id="gmail-load-more" style="text-align:center;padding:8px;display:none;">
+      <button class="btn" onclick="_gmailLoadMore()" style="font-size:0.75rem;">Load more</button>
+    </div>
   </div>
-  <div style="padding:0 12px 4px;display:flex;align-items:center;gap:8px;">
-    <span style="font-size:0.78rem;font-weight:600;color:var(--dim);">Detected Events</span>
-    <div style="flex:1;"></div>
-    <select id="email-filter" onchange="_emailRender()" style="font-size:0.75rem;padding:3px 7px;border-radius:5px;border:1px solid var(--border);background:var(--bg);color:var(--text);">
-      <option value="">All</option>
-      <option value="synced">Synced</option>
-      <option value="pending">Pending</option>
-      <option value="dismissed">Dismissed</option>
-    </select>
+  <!-- Email detail pane -->
+  <div class="gmail-detail-pane" id="gmail-detail-pane">
+    <div class="gmail-detail-empty" id="gmail-detail-empty">
+      <div style="font-size:2rem;margin-bottom:8px;">&#9993;</div>
+      <div style="color:var(--dim);font-size:0.85rem;">Select an email to read it</div>
+    </div>
+    <div id="gmail-thread-view" style="display:none;flex-direction:column;height:100%;">
+      <div class="gmail-thread-subject" id="gmail-thread-subject"></div>
+      <div id="gmail-thread-messages" class="gmail-thread-messages"></div>
+      <div class="gmail-reply-box" id="gmail-reply-box" style="display:none;">
+        <div style="font-size:0.75rem;color:var(--dim);margin-bottom:4px;" id="gmail-reply-label">Reply</div>
+        <textarea id="gmail-reply-body" class="gmail-reply-textarea" placeholder="Write your reply&#x2026;" rows="4"></textarea>
+        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;">
+          <button class="btn" onclick="_gmailCancelReply()">Cancel</button>
+          <button class="btn primary" onclick="_gmailSendReply()">Send</button>
+        </div>
+      </div>
+    </div>
   </div>
-  <div id="email-events-list" style="padding:0 12px 60px;display:flex;flex-direction:column;gap:8px;"></div>
 </div>
 <div id="files-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
   <!-- Toolbar -->
@@ -14661,7 +15090,7 @@ function switchView(view) {
   document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
   document.getElementById('browser-view').style.display = view === 'browser' ? 'flex' : 'none';
   document.getElementById('logs-view').style.display = view === 'logs' ? 'flex' : 'none';
-  document.getElementById('email-view').style.display = view === 'email' ? '' : 'none';
+  document.getElementById('email-view').style.display = view === 'email' ? 'flex' : 'none';
   document.getElementById('notes-view').style.display = view === 'notes' ? 'flex' : 'none';
   document.getElementById('crm-view').style.display = view === 'crm' ? 'flex' : 'none';
   document.getElementById('map-view').style.display = view === 'map' ? 'flex' : 'none';
@@ -19734,80 +20163,369 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape' && document.getElementById('crm-log-modal').classList.contains('open')) _crmCloseLog();
 });
 
-// ── Email Events tab ──────────────────────────────────────────────────────────
-let _emailEvents = [];
+// ── Gmail Inbox tab ────────────────────────────────────────────────────────────
+let _gmailAccounts = [];
+let _gmailActiveAccount = '';
+let _gmailActiveLabel = 'INBOX';
+let _gmailNextPageToken = '';
+let _gmailActiveThreadId = '';
+let _gmailReplyMsgId = '';
+let _gmailSidebarOpen = true;
+let _gmailSearchTimer = null;
+
+const _LABEL_ICONS = {
+  INBOX:'📥', STARRED:'⭐', SENT:'📤', DRAFTS:'📝', SPAM:'⚠️', TRASH:'🗑️', UNREAD:'●',
+};
+
+function _gmailFmtFrom(from) {
+  // Extract display name or email from "Name <email>" format
+  const m = from.match(/^([^<]+)<[^>]+>/);
+  return m ? m[1].trim() : from;
+}
+
+function _gmailFmtDate(ts) {
+  if (!ts) return '';
+  const d = new Date(parseInt(ts));
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) {
+    return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  }
+  const diffDays = (now - d) / 86400000;
+  if (diffDays < 7) return d.toLocaleDateString([], {weekday:'short'});
+  return d.toLocaleDateString([], {month:'short', day:'numeric'});
+}
 
 async function _emailLoad() {
-  await _emailRender();
-}
-
-async function _emailRender() {
-  try {
-    const filter = document.getElementById('email-filter').value;
-    const r = await fetch('/api/email/events' + (filter ? '?status=' + filter : ''));
-    _emailEvents = r.ok ? await r.json() : [];
-  } catch(e) { _emailEvents = []; }
-  const el = document.getElementById('email-events-list');
-  const visible = _emailEvents.filter(e => e.status !== 'not_event');
-  if (!visible.length) {
-    el.innerHTML = '<div style="color:var(--dim);font-size:0.82rem;text-align:center;padding:40px 0;">No events detected yet.<br><span style="font-size:0.75rem;">Click \u21BB Sync Now to scan Mail.app for ticket and event emails.</span></div>';
+  // Load connected accounts, then render inbox
+  const r = await fetch(API + '/api/gmail/accounts').catch(() => null);
+  if (!r || !r.ok) { _gmailRenderEmpty('Could not connect to server'); return; }
+  const data = await r.json();
+  _gmailAccounts = data.accounts || [];
+  if (!_gmailAccounts.length) {
+    _gmailRenderNoAccounts();
     return;
   }
-  el.innerHTML = visible.map(ev => {
-    const statusColor = ev.status === 'synced' ? 'var(--green)' : ev.status === 'dismissed' ? 'var(--dim)' : 'var(--yellow)';
-    const statusLabel = ev.status === 'synced' ? '\u2713 On Calendar' : ev.status === 'dismissed' ? '\u2014 Dismissed' : '\u23f3 Pending';
-    let startFmt = '';
-    if (ev.event_start) {
-      try {
-        const d = new Date(ev.event_start.includes('T') ? ev.event_start : ev.event_start + 'T00:00:00');
-        startFmt = d.toLocaleString(undefined, {dateStyle:'medium', timeStyle: ev.event_start.includes('T') ? 'short' : undefined});
-      } catch(e2) { startFmt = ev.event_start; }
-    }
-    const from = escHtml((ev.email_from || '').replace(/<[^>]+>/g, '').trim());
-    const acct = escHtml(ev.account_id || '');
-    return '<div style="background:var(--card);border:1px solid var(--border);border-radius:7px;padding:10px 12px;">'
-      + '<div style="display:flex;align-items:flex-start;gap:8px;">'
-      + '<div style="flex:1;min-width:0;">'
-      + '<div style="font-weight:600;font-size:0.85rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escHtml(ev.event_title || ev.email_subject || '(unknown)') + '</div>'
-      + (startFmt ? '<div style="font-size:0.78rem;color:var(--accent);margin-top:2px;">\uD83D\uDCC5 ' + startFmt + '</div>' : '')
-      + (ev.event_location ? '<div style="font-size:0.75rem;color:var(--dim);margin-top:2px;">\uD83D\uDCCD ' + escHtml(ev.event_location) + '</div>' : '')
-      + (ev.event_description ? '<div style="font-size:0.75rem;color:var(--dim);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">' + escHtml(ev.event_description) + '</div>' : '')
-      + '<div style="font-size:0.7rem;color:var(--dim);margin-top:4px;">' + (acct ? acct + ' \u2022 ' : '') + from + '</div>'
-      + '</div>'
-      + '<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;">'
-      + '<span style="font-size:0.72rem;font-weight:600;color:' + statusColor + ';">' + statusLabel + '</span>'
-      + (ev.status === 'pending' ? '<button class="btn" onclick="_emailPush(\'' + ev.id + '\')" style="font-size:0.7rem;padding:2px 8px;">\uD83D\uDCC5 Add</button>' : '')
-      + (ev.status !== 'dismissed' ? '<button class="btn" onclick="_emailDismiss(\'' + ev.id + '\')" style="font-size:0.7rem;padding:2px 8px;color:var(--dim);">\u2715</button>' : '')
-      + '</div></div></div>';
-  }).join('');
+  if (!_gmailActiveAccount || !_gmailAccounts.includes(_gmailActiveAccount)) {
+    _gmailActiveAccount = _gmailAccounts[0];
+  }
+  _gmailRenderAccountsList();
+  await _gmailLoadLabels();
+  await _gmailLoadInbox();
 }
 
-async function _emailSync() {
-  const btn = document.getElementById('email-sync-btn');
-  btn.textContent = 'Syncing\u2026';
-  btn.disabled = true;
-  try {
-    await fetch('/api/email/sync', {method:'POST'});
-    // Sync runs in background (Mail.app can take a while); poll after a delay
-    setTimeout(async () => {
-      btn.textContent = '\u21BB Sync Now'; btn.disabled = false;
-      await _emailRender();
-      const ts = document.getElementById('email-last-sync');
-      if (ts) ts.textContent = 'synced ' + new Date().toLocaleTimeString();
-    }, 5000);
-  } catch(e) { btn.textContent = '\u21BB Sync Now'; btn.disabled = false; }
+function _gmailRenderEmpty(msg) {
+  document.getElementById('gmail-messages-list').innerHTML =
+    \`<div style="color:var(--dim);font-size:0.82rem;text-align:center;padding:40px 12px;">\${esc(msg)}</div>\`;
 }
 
-async function _emailPush(id) {
-  const r = await fetch('/api/email/events/' + id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({push: true})});
-  const d = await r.json();
-  if (d.ok) _emailRender();
-  else alert('Calendar.app error: ' + (d.error || 'unknown'));
+function _gmailRenderNoAccounts() {
+  document.getElementById('gmail-accounts-list').innerHTML = '';
+  document.getElementById('gmail-labels-list').innerHTML = '';
+  document.getElementById('gmail-messages-list').innerHTML = \`
+    <div style="color:var(--dim);font-size:0.82rem;text-align:center;padding:40px 12px;">
+      No Gmail accounts connected.<br>
+      <button class="btn" onclick="_gmailConnectAccount()" style="margin-top:12px;font-size:0.78rem;">+ Connect Account</button>
+    </div>\`;
 }
 
-async function _emailDismiss(id) {
-  await fetch('/api/email/events/' + id, {method:'PATCH', headers:{'Content-Type':'application/json'}, body: JSON.stringify({status:'dismissed'})});
-  _emailRender();
+function _gmailRenderAccountsList() {
+  const el = document.getElementById('gmail-accounts-list');
+  el.innerHTML = _gmailAccounts.map(a => \`
+    <div class="gmail-account-item \${a === _gmailActiveAccount ? 'active' : ''}"
+         onclick="_gmailSwitchAccount('\${esc(a)}')">
+      <div class="gmail-account-dot" style="background:\${a === _gmailActiveAccount ? 'var(--accent)' : 'var(--dim)'}"></div>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:0.78rem;">\${esc(a)}</span>
+    </div>\`).join('');
+}
+
+async function _gmailLoadLabels() {
+  const r = await fetch(API + '/api/gmail/labels?account=' + encodeURIComponent(_gmailActiveAccount)).catch(()=>null);
+  if (!r || !r.ok) return;
+  const data = await r.json();
+  const labels = (data.labels || []).filter(l => l.type !== 'system' || ['INBOX','STARRED','SENT','DRAFTS','SPAM','TRASH'].includes(l.name));
+  const el = document.getElementById('gmail-labels-list');
+  el.innerHTML = labels.map(l => \`
+    <div class="gmail-label-item \${l.name === _gmailActiveLabel ? 'active' : ''}"
+         onclick="_gmailSwitchLabel('\${esc(l.name)}')">
+      <span class="gmail-label-icon">\${_LABEL_ICONS[l.name] || '🏷️'}</span>
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">\${esc(l.name === 'INBOX' ? 'Inbox' : l.name)}</span>
+    </div>\`).join('');
+}
+
+async function _gmailLoadInbox(pageToken='') {
+  const list = document.getElementById('gmail-messages-list');
+  const q = document.getElementById('gmail-search').value.trim();
+  if (!pageToken) { list.innerHTML = '<div style="color:var(--dim);font-size:0.8rem;text-align:center;padding:30px;">Loading\u2026</div>'; }
+  const params = new URLSearchParams({ account: _gmailActiveAccount, label: _gmailActiveLabel });
+  if (pageToken) params.set('page_token', pageToken);
+  if (q) params.set('q', q);
+  const r = await fetch(API + '/api/gmail/inbox?' + params).catch(()=>null);
+  if (!r || !r.ok) { _gmailRenderEmpty('Failed to load inbox'); return; }
+  const data = await r.json();
+  if (data.error === 'not_connected') { _gmailRenderNoAccounts(); return; }
+  if (data.error) { _gmailRenderEmpty('Error: ' + data.error); return; }
+  const msgs = data.messages || [];
+  _gmailNextPageToken = data.next_page_token || '';
+  const lmBtn = document.getElementById('gmail-load-more');
+  lmBtn.style.display = _gmailNextPageToken ? '' : 'none';
+  if (!pageToken) list.innerHTML = '';
+  if (!msgs.length && !pageToken) {
+    list.innerHTML = '<div style="color:var(--dim);font-size:0.8rem;text-align:center;padding:30px;">No messages</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  msgs.forEach(m => {
+    const div = document.createElement('div');
+    div.className = 'gmail-msg-item' + (m.unread ? ' unread' : '');
+    div.dataset.threadId = m.thread_id;
+    div.dataset.msgId = m.id;
+    div.onclick = () => _gmailOpenThread(m.thread_id, div);
+    div.innerHTML = \`
+      <div class="gmail-msg-row1">
+        \${m.unread ? '<div class="gmail-unread-dot"></div>' : ''}
+        <div class="gmail-msg-from">\${esc(_gmailFmtFrom(m.from))}</div>
+        <div class="gmail-msg-date">\${esc(_gmailFmtDate(m.internal_date))}</div>
+      </div>
+      <div class="gmail-msg-subject">\${esc(m.subject)}</div>
+      <div class="gmail-msg-snippet">\${esc(m.snippet)}</div>\`;
+    frag.appendChild(div);
+  });
+  list.appendChild(frag);
+}
+
+async function _gmailLoadMore() {
+  if (_gmailNextPageToken) await _gmailLoadInbox(_gmailNextPageToken);
+}
+
+async function _gmailOpenThread(threadId, itemEl) {
+  // Mark active in list
+  document.querySelectorAll('.gmail-msg-item').forEach(el => el.classList.remove('active'));
+  if (itemEl) itemEl.classList.add('active');
+  _gmailActiveThreadId = threadId;
+  // Show detail pane (mobile: make it visible)
+  const detail = document.getElementById('gmail-detail-pane');
+  detail.classList.add('mobile-open');
+  document.getElementById('gmail-detail-empty').style.display = 'none';
+  const tv = document.getElementById('gmail-thread-view');
+  tv.style.display = 'flex';
+  document.getElementById('gmail-thread-messages').innerHTML =
+    '<div style="color:var(--dim);font-size:0.8rem;text-align:center;padding:30px;">Loading\u2026</div>';
+  document.getElementById('gmail-reply-box').style.display = 'none';
+  const r = await fetch(API + '/api/gmail/thread/' + encodeURIComponent(threadId) + '?account=' + encodeURIComponent(_gmailActiveAccount)).catch(()=>null);
+  if (!r || !r.ok) {
+    document.getElementById('gmail-thread-messages').innerHTML = '<div style="color:var(--dim);padding:20px;">Failed to load thread</div>';
+    return;
+  }
+  const data = await r.json();
+  if (data.error) {
+    document.getElementById('gmail-thread-messages').innerHTML = '<div style="color:var(--dim);padding:20px;">' + esc(data.error) + '</div>';
+    return;
+  }
+  const msgs = data.messages || [];
+  // Subject from first message
+  const subj = msgs[0]?.subject || '(no subject)';
+  document.getElementById('gmail-thread-subject').innerHTML = \`
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button class="btn" onclick="_gmailCloseThread()" style="font-size:0.72rem;padding:2px 8px;display:none;" id="gmail-back-btn">← Back</button>
+      <span style="flex:1;">\${esc(subj)}</span>
+      <button class="btn" onclick="_gmailShowReply()" style="font-size:0.75rem;padding:3px 10px;">Reply</button>
+    </div>\`;
+  // Show back button on mobile
+  if (window.innerWidth <= 768) document.getElementById('gmail-back-btn').style.display = '';
+  // Store last message id for reply threading
+  _gmailReplyMsgId = msgs[msgs.length - 1]?.message_id_header || '';
+  const container = document.getElementById('gmail-thread-messages');
+  container.innerHTML = '';
+  msgs.forEach((msg, i) => {
+    const collapsed = i < msgs.length - 1;
+    const card = document.createElement('div');
+    card.className = 'gmail-msg-card' + (collapsed ? ' collapsed' : '');
+    const body = msg.html_body || msg.text_body.replace(/\\n/g, '<br>') || '(empty)';
+    const bodyHtml = msg.html_body
+      ? \`<iframe srcdoc="\${body.replace(/"/g,'&quot;')}" style="min-height:200px;max-height:600px;" onload="this.style.height=(this.contentDocument.body.scrollHeight+20)+'px'"></iframe>\`
+      : \`<div style="white-space:pre-wrap;word-break:break-word;">\${esc(msg.text_body || '(empty)')}</div>\`;
+    card.innerHTML = \`
+      <div class="gmail-msg-card-header" onclick="this.closest('.gmail-msg-card').classList.toggle('collapsed')">
+        <span class="gmail-msg-card-from">\${esc(_gmailFmtFrom(msg.from))} \u2192 \${esc(msg.to)}</span>
+        <span class="gmail-msg-card-date">\${esc(_gmailFmtDate(msg.internal_date))}</span>
+      </div>
+      <div class="gmail-msg-card-body">\${bodyHtml}</div>\`;
+    container.appendChild(card);
+  });
+  // Mark as read in list
+  const listItem = document.querySelector(\`.gmail-msg-item[data-thread-id="\${threadId}"]\`);
+  if (listItem) { listItem.classList.remove('unread'); listItem.querySelector('.gmail-unread-dot')?.remove(); }
+}
+
+function _gmailCloseThread() {
+  document.getElementById('gmail-detail-pane').classList.remove('mobile-open');
+  document.getElementById('gmail-detail-empty').style.display = '';
+  document.getElementById('gmail-thread-view').style.display = 'none';
+}
+
+function _gmailShowReply() {
+  const rb = document.getElementById('gmail-reply-box');
+  rb.style.display = '';
+  document.getElementById('gmail-reply-label').textContent = 'Reply to thread';
+  document.getElementById('gmail-reply-body').value = '';
+  document.getElementById('gmail-reply-body').focus();
+}
+
+function _gmailCancelReply() {
+  document.getElementById('gmail-reply-box').style.display = 'none';
+}
+
+async function _gmailSendReply() {
+  const body = document.getElementById('gmail-reply-body').value.trim();
+  if (!body) return;
+  // Get subject from thread header
+  const subjEl = document.getElementById('gmail-thread-subject').querySelector('span');
+  const subject = subjEl ? 'Re: ' + subjEl.textContent.replace(/^Re: /i, '') : 'Re: (no subject)';
+  // Get "to" from thread — reply to last sender
+  const msgs = document.querySelectorAll('.gmail-msg-card');
+  const lastFrom = msgs[msgs.length - 1]?.querySelector('.gmail-msg-card-from')?.textContent || '';
+  const toAddr = lastFrom.split('→')[0].trim();
+  const r = await fetch(API + '/api/gmail/send', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      account: _gmailActiveAccount,
+      to: toAddr,
+      subject: subject,
+      body: body,
+      reply_to_message_id: _gmailReplyMsgId,
+      thread_id: _gmailActiveThreadId,
+    }),
+  }).catch(()=>null);
+  if (!r || !r.ok) { await showAlert('Failed to send reply'); return; }
+  const data = await r.json();
+  if (data.error) { await showAlert('Send failed: ' + data.error); return; }
+  document.getElementById('gmail-reply-box').style.display = 'none';
+  showToast('Reply sent');
+  // Reload thread to show new message
+  setTimeout(() => _gmailOpenThread(_gmailActiveThreadId, null), 800);
+}
+
+function _gmailCompose() {
+  if (!_gmailActiveAccount) { showAlert('Connect a Gmail account first'); return; }
+  _modalResolve = null;
+  document.getElementById('modal-msg').innerHTML = \`
+    <div style="text-align:left;width:100%;max-width:480px;">
+      <div style="font-size:0.95rem;font-weight:700;margin-bottom:12px;">New Email</div>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <input id="compose-to" type="email" placeholder="To" style="width:100%;box-sizing:border-box;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;outline:none;">
+        <input id="compose-subject" type="text" placeholder="Subject" style="width:100%;box-sizing:border-box;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;outline:none;">
+        <textarea id="compose-body" placeholder="Message body" rows="8" style="width:100%;box-sizing:border-box;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;outline:none;resize:vertical;font-family:inherit;"></textarea>
+        <div style="font-size:0.72rem;color:var(--dim);">From: \${esc(_gmailActiveAccount)}</div>
+      </div>
+    </div>\`;
+  document.getElementById('modal-btns').innerHTML = \`
+    <button class="btn" onclick="_modalClose(false)">Cancel</button>
+    <button class="btn primary" onclick="_gmailSendCompose()">Send</button>\`;
+  document.getElementById('modal-backdrop').classList.add('open');
+}
+
+async function _gmailSendCompose() {
+  const to = document.getElementById('compose-to')?.value.trim();
+  const subject = document.getElementById('compose-subject')?.value.trim();
+  const body = document.getElementById('compose-body')?.value.trim();
+  if (!to || !subject || !body) { return; }
+  _modalClose(false);
+  const r = await fetch(API + '/api/gmail/send', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ account: _gmailActiveAccount, to, subject, body }),
+  }).catch(()=>null);
+  const data = r ? await r.json() : null;
+  if (data?.ok) { showToast('Email sent'); }
+  else { await showAlert('Send failed: ' + (data?.error || 'unknown')); }
+}
+
+async function _gmailSwitchAccount(account) {
+  _gmailActiveAccount = account;
+  _gmailActiveLabel = 'INBOX';
+  _gmailRenderAccountsList();
+  await _gmailLoadLabels();
+  await _gmailLoadInbox();
+}
+
+async function _gmailSwitchLabel(label) {
+  _gmailActiveLabel = label;
+  // Update active label in sidebar
+  document.querySelectorAll('.gmail-label-item').forEach(el => {
+    el.classList.toggle('active', el.textContent.includes(label) || el.dataset?.label === label);
+  });
+  await _gmailLoadInbox();
+}
+
+async function _gmailRefreshInbox() {
+  await _gmailLoadInbox();
+}
+
+function _gmailSearchDebounce() {
+  clearTimeout(_gmailSearchTimer);
+  _gmailSearchTimer = setTimeout(() => _gmailLoadInbox(), 500);
+}
+
+function _gmailToggleSidebar() {
+  _gmailSidebarOpen = !_gmailSidebarOpen;
+  const view = document.getElementById('email-view');
+  const sidebar = document.getElementById('gmail-sidebar');
+  const expandBtn = document.getElementById('gmail-expand-btn');
+  if (_gmailSidebarOpen) {
+    sidebar.classList.remove('collapsed');
+    view.classList.remove('gmail-sidebar-collapsed');
+    if (expandBtn) expandBtn.style.display = 'none';
+  } else {
+    sidebar.classList.add('collapsed');
+    view.classList.add('gmail-sidebar-collapsed');
+    if (expandBtn) expandBtn.style.display = '';
+  }
+}
+
+async function _gmailConnectAccount() {
+  const account = prompt('Enter Gmail address to connect:');
+  if (!account || !account.includes('@')) return;
+  // Get auth URL
+  const r = await fetch(API + '/api/gmail/auth?account=' + encodeURIComponent(account)).catch(()=>null);
+  if (!r || !r.ok) { await showAlert('Failed to generate auth URL'); return; }
+  const data = await r.json();
+  const authUrl = data.url;
+  // Open in new tab and show code entry dialog
+  window.open(authUrl, '_blank');
+  _modalResolve = null;
+  document.getElementById('modal-msg').innerHTML = \`
+    <div style="text-align:left;max-width:420px;">
+      <div style="font-weight:700;margin-bottom:8px;">Connect \${esc(account)}</div>
+      <p style="font-size:0.82rem;color:var(--dim);margin:0 0 12px;">
+        A Google authorization page has opened in a new tab. Sign in as <strong>\${esc(account)}</strong>,
+        then paste the authorization code below.
+      </p>
+      <input id="gmail-auth-code" type="text" placeholder="Paste code here" autocomplete="off"
+        style="width:100%;box-sizing:border-box;padding:7px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:0.85rem;outline:none;font-family:monospace;">
+    </div>\`;
+  document.getElementById('modal-btns').innerHTML = \`
+    <button class="btn" onclick="_modalClose(false)">Cancel</button>
+    <button class="btn primary" onclick="_gmailSubmitCode('\${esc(account)}')">Connect</button>\`;
+  document.getElementById('modal-backdrop').classList.add('open');
+}
+
+async function _gmailSubmitCode(account) {
+  const code = document.getElementById('gmail-auth-code')?.value.trim();
+  if (!code) return;
+  _modalClose(false);
+  const r = await fetch(API + '/api/gmail/connect', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ account, code }),
+  }).catch(()=>null);
+  const data = r ? await r.json() : null;
+  if (data?.ok) {
+    showToast('Connected ' + account);
+    await _emailLoad();
+  } else {
+    await showAlert('Connection failed: ' + (data?.error || 'unknown'));
+  }
 }
 </script>
 
@@ -22194,6 +22912,73 @@ class CCHandler(BaseHTTPRequestHandler):
                     result["raw"] = ""
                     result["raw_total_lines"] = 0
             return self._json(result)
+
+        # ── /api/gmail/* — Gmail API (OAuth2 per-account) ──────────────────────
+        if path.startswith("/api/gmail"):
+            # GET /api/gmail/accounts
+            if path == "/api/gmail/accounts":
+                return self._json({"accounts": _gmail_connected_accounts()})
+
+            # GET /api/gmail/auth?account=<email>  → OAuth authorization URL
+            if path == "/api/gmail/auth" and method == "GET":
+                account = qs.get("account", [""])[0].strip()
+                if not account:
+                    return self._json({"error": "account required"}, 400)
+                url = _gmail_auth_url(account)
+                return self._json({"url": url, "account": account})
+
+            # POST /api/gmail/connect  {account, code}  → exchange code → store token
+            if path == "/api/gmail/connect" and method == "POST":
+                body = self._read_body()
+                account = body.get("account", "").strip()
+                code = body.get("code", "").strip()
+                if not account or not code:
+                    return self._json({"error": "account and code required"}, 400)
+                ok, err = _gmail_exchange_code(account, code)
+                return self._json({"ok": ok, "error": err})
+
+            # DELETE /api/gmail/account?account=  → disconnect / remove token
+            if path == "/api/gmail/account" and method == "DELETE":
+                account = qs.get("account", [""])[0].strip()
+                p = _gmail_token_path(account)
+                if p.exists():
+                    p.unlink()
+                return self._json({"ok": True})
+
+            # GET /api/gmail/inbox?account=&label=INBOX&page_token=&q=
+            if path == "/api/gmail/inbox":
+                account = qs.get("account", [""])[0]
+                label   = qs.get("label", ["INBOX"])[0]
+                ptok    = qs.get("page_token", [""])[0]
+                q       = qs.get("q", [""])[0]
+                return self._json(_gmail_list_messages(account, label, ptok, q))
+
+            # GET /api/gmail/thread/<id>?account=
+            _m_th = re.match(r"^/api/gmail/thread/([^/]+)$", path)
+            if _m_th:
+                account   = qs.get("account", [""])[0]
+                thread_id = _m_th.group(1)
+                return self._json(_gmail_get_thread(account, thread_id))
+
+            # GET /api/gmail/labels?account=
+            if path == "/api/gmail/labels":
+                account = qs.get("account", [""])[0]
+                return self._json({"labels": _gmail_list_labels(account)})
+
+            # POST /api/gmail/send  {account, to, subject, body, reply_to_message_id?, thread_id?}
+            if path == "/api/gmail/send" and method == "POST":
+                body = self._read_body()
+                result = _gmail_send_message(
+                    account=body.get("account", ""),
+                    to=body.get("to", ""),
+                    subject=body.get("subject", ""),
+                    body=body.get("body", ""),
+                    reply_msg_id=body.get("reply_to_message_id", ""),
+                    thread_id=body.get("thread_id", ""),
+                )
+                return self._json(result)
+
+            return self._json({"error": "not found"}, 404)
 
         # ── /api/email/* — Mail.app + Calendar.app via AppleScript (no OAuth) ────
         if path.startswith("/api/email"):
