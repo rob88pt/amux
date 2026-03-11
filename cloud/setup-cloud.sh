@@ -19,7 +19,7 @@ fi
 systemctl enable --now docker
 
 # ── Python deps for gateway ───────────────────────────────────────────────────
-pip3 install -q "PyJWT[crypto]" cryptography
+pip3 install -q "PyJWT[crypto]" cryptography stripe
 
 # ── Directories ───────────────────────────────────────────────────────────────
 mkdir -p /var/amux/users /opt/amux/cloud

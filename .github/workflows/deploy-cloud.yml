@@ -37,7 +37,7 @@ jobs:
           rsync --inplace -e "ssh -i ~/.ssh/amux_cloud" cloud/gateway/gateway.py \
             root@5.161.66.217:/opt/amux-cloud/gateway/gateway.py
           ssh -i ~/.ssh/amux_cloud root@5.161.66.217 \
-            'systemctl restart amux-gateway && echo "gateway restarted"'
+            'pip3 install -q stripe 2>/dev/null; systemctl restart amux-gateway && echo "gateway restarted"'
 
       - name: Deploy docker-compose template
         run: |
