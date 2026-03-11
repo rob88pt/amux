@@ -199,594 +199,6 @@ _send_locks: dict = {}          # per-session locks for serializing send_text/se
 _send_locks_lock = threading.Lock()  # protects _send_locks dict itself
 _session_auto_actions: dict = {} # {name: {"last_compact": ts, "last_restart": ts}}
 
-# ── Remote browser (screenshot-based Playwright child process) ──
-_rb_proc: subprocess.Popen | None = None
-_rb_lock = threading.Lock()
-_rb_profile: str = "default"  # current active profile name
-_rb_last_video: str | None = None  # path to last recorded video (mp4 or webm)
-_RB_PROFILES_DIR = CC_HOME / "playwright-auth" / "profiles"
-_RB_VIDEOS_DIR = CC_HOME / "browser-videos"
-_RB_RECORDINGS_DIR = CC_HOME / "recordings"
-
-
-def _profile_has_state(profile_path: Path) -> bool:
-    """Return True if the Chromium profile has saved cookies (i.e. the user has logged in)."""
-    cookies = profile_path / "Default" / "Cookies"
-    return cookies.is_file() and cookies.stat().st_size > 4096
-
-
-def _ms_to_srt_ts(ms: int) -> str:
-    """Convert milliseconds to SRT timecode HH:MM:SS,mmm."""
-    h = ms // 3_600_000; ms %= 3_600_000
-    m = ms // 60_000;    ms %= 60_000
-    s = ms // 1_000;     ms %= 1_000
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
-
-
-def _write_srt(captions: list, srt_path: str) -> None:
-    """Write a list of {start, end, text} dicts as an SRT subtitle file."""
-    lines = []
-    for i, c in enumerate(captions, 1):
-        lines.append(f"{i}\n{_ms_to_srt_ts(c['start'])} --> {_ms_to_srt_ts(c['end'])}\n{c['text']}")
-    Path(srt_path).write_text("\n\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _rb_process_video(webm: str, captions: list | None = None,
-                      profile: str | None = None, task: str | None = None) -> str:
-    """Convert WebM → MP4, burning in SRT captions if provided. Returns final path."""
-    global _rb_last_video
-    _RB_RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
-    ts = int(time.time())
-    mp4 = str(_RB_RECORDINGS_DIR / f"recording-{ts}.mp4")
-
-    ffmpeg_base = ["ffmpeg", "-y", "-i", webm,
-                   "-c:v", "libx264", "-crf", "18", "-preset", "fast",
-                   "-pix_fmt", "yuv420p", "-movflags", "+faststart"]
-
-    if captions:
-        srt_path = str(_RB_RECORDINGS_DIR / f"recording-{ts}.srt")
-        _write_srt(captions, srt_path)
-        # Escape SRT path for ffmpeg subtitle filter (colons need backslash on macOS)
-        srt_esc = srt_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-        sub_filter = (f"subtitles='{srt_esc}':force_style="
-                      "'FontSize=24,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"
-                      "Outline=2,Shadow=1,Alignment=2,MarginV=40'")
-        try:
-            r = subprocess.run(
-                ffmpeg_base + ["-vf", sub_filter, mp4],
-                capture_output=True, timeout=180,
-            )
-            if r.returncode == 0 and os.path.exists(mp4):
-                _rb_last_video = mp4
-                _rb_write_recording_meta(mp4, profile, task)
-                return mp4
-        except Exception:
-            pass
-        # Fallback: no subtitle burn-in
-        mp4 = str(_RB_RECORDINGS_DIR / f"recording-{ts}-nosubs.mp4")
-
-    try:
-        r = subprocess.run(
-            ffmpeg_base + [mp4],
-            capture_output=True, timeout=180,
-        )
-        if r.returncode == 0 and os.path.exists(mp4):
-            _rb_last_video = mp4
-            _rb_write_recording_meta(mp4, profile, task)
-            return mp4
-    except Exception:
-        pass
-
-    _rb_last_video = webm
-    return webm
-
-
-def _rb_write_recording_meta(mp4_path: str, profile: str | None, task: str | None) -> None:
-    """Write a .json sidecar next to an MP4 recording with profile + task metadata."""
-    import json as _json
-    meta = {k: v for k, v in {"profile": profile or "default", "task": task}.items() if v}
-    try:
-        Path(mp4_path).with_suffix(".json").write_text(
-            _json.dumps(meta, ensure_ascii=False), encoding="utf-8"
-        )
-    except Exception:
-        pass
-
-# ── Browser agent state ──
-_rb_agent_state: dict = {
-    "running": False, "task": "", "step": 0, "total_steps": 0,
-    "action": "", "done": False, "error": None, "video_ready": False,
-}
-_rb_agent_lock = threading.Lock()
-
-def _rb_agent_update(**kwargs):
-    with _rb_agent_lock:
-        _rb_agent_state.update(kwargs)
-
-def _run_browser_agent(task: str, start_url: str = "", max_steps: int = 25):
-    """Drive the browser with Claude tool-use, record everything, produce MP4."""
-    global _rb_last_video
-    try:
-        import anthropic
-    except ImportError as _e:
-        _rb_agent_update(running=False, error=f"anthropic not installed: {_e}", action="Error")
-        return
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        _rb_agent_update(running=False, error="ANTHROPIC_API_KEY not set", action="Error")
-        return
-
-    client = anthropic.Anthropic(api_key=api_key)
-    tools = [
-        {"name": "navigate", "description": "Navigate to a URL.",
-         "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
-        {"name": "click", "description": "Click at pixel coordinates (x, y). The viewport is 1280×800.",
-         "input_schema": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}}, "required": ["x", "y"]}},
-        {"name": "type", "description": "Type text into the currently focused element.",
-         "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}},
-        {"name": "key", "description": "Press a keyboard key, e.g. Enter, Tab, Escape, ArrowDown.",
-         "input_schema": {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}},
-        {"name": "scroll", "description": "Scroll the page. dy > 0 scrolls down. Provide x,y to scroll over a specific area (e.g. x=580,y=400 for the email list in Gmail).",
-         "input_schema": {"type": "object", "properties": {"dy": {"type": "number"}, "x": {"type": "number"}, "y": {"type": "number"}}, "required": ["dy"]}},
-        {"name": "wait", "description": "Pause for ms milliseconds while content loads (max 5000).",
-         "input_schema": {"type": "object", "properties": {"ms": {"type": "number"}}, "required": ["ms"]}},
-        {"name": "done", "description": "Task complete — stop the browser and save the recording.",
-         "input_schema": {"type": "object", "properties": {"summary": {"type": "string"}}, "required": ["summary"]}},
-    ]
-
-    messages: list = []
-    try:
-        _rb_agent_update(action="Starting browser…", total_steps=max_steps)
-        start_cmd: dict = {"action": "start", "url": start_url or "about:blank", "record": True}
-        with _rb_agent_lock:
-            prof = _rb_agent_state.get("_profile", _rb_profile)
-        if prof and prof != "default":
-            start_cmd["profile"] = prof
-        result = _rb_send(start_cmd, timeout=30.0)
-        if not result.get("ok"):
-            _rb_agent_update(running=False, error=result.get("error", "Browser start failed"))
-            return
-        for step in range(max_steps):
-            with _rb_agent_lock:
-                if not _rb_agent_state["running"]:
-                    break
-
-            _rb_agent_update(step=step + 1, action=f"Step {step+1}/{max_steps} — screenshot")
-            ss = _rb_send({"action": "screenshot"}, timeout=15.0)
-            if not ss.get("ok"):
-                time.sleep(1)
-                continue
-
-            _rb_agent_update(action=f"Step {step+1}/{max_steps} — thinking…")
-            messages.append({"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": ss["data"]}},
-                {"type": "text", "text":
-                    f"URL: {ss.get('url','')}\nTitle: {ss.get('title','')}\n\n"
-                    f"Task: {task}\n\n"
-                    f"Step {step+1} of up to {max_steps}. "
-                    "Continue working on the task. Call done() when finished."},
-            ]})
-
-            response = client.messages.create(
-                model="claude-sonnet-4-6", max_tokens=1024,
-                tools=tools, messages=messages,
-            )
-            messages.append({"role": "assistant", "content": response.content})
-
-            tool_results = []
-            done = False
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-                name, inp, bid = block.name, block.input, block.id
-                label = f"{name}({', '.join(f'{k}={repr(v)}' for k,v in inp.items())})"
-                _rb_agent_update(action=f"Step {step+1} — {label}")
-
-                if name == "done":
-                    done = True
-                    tool_results.append({"type": "tool_result", "tool_use_id": bid, "content": "Done."})
-                    break
-                elif name == "navigate":
-                    r = _rb_send({"action": "navigate", "url": inp["url"]}, timeout=20.0)
-                elif name == "click":
-                    r = _rb_send({"action": "click", "x": inp["x"], "y": inp["y"]})
-                elif name == "type":
-                    r = _rb_send({"action": "type", "text": inp["text"]})
-                elif name == "key":
-                    r = _rb_send({"action": "key", "key": inp["key"]})
-                elif name == "scroll":
-                    r = _rb_send({"action": "scroll", "dy": inp["dy"],
-                                  "x": inp.get("x", 640), "y": inp.get("y", 400)})
-                elif name == "wait":
-                    time.sleep(min(float(inp.get("ms", 1000)), 5000) / 1000)
-                    r = {"ok": True}
-                else:
-                    r = {"ok": False, "error": f"unknown tool: {name}"}
-                tool_results.append({"type": "tool_result", "tool_use_id": bid, "content": json.dumps(r)})
-
-            if tool_results:
-                messages.append({"role": "user", "content": tool_results})
-            if done or response.stop_reason == "end_turn":
-                break
-
-    except Exception as e:
-        _rb_agent_update(error=str(e))
-    finally:
-        _rb_agent_update(action="Converting video…")
-        stop_result = _rb_send({"action": "stop"}, timeout=30.0)
-        _rb_last_video = None
-        webm = stop_result.get("videoPath")
-        captions = stop_result.get("captions") or []
-        if webm and os.path.exists(webm):
-            with _rb_agent_lock:
-                agent_prof = _rb_agent_state.get("_profile") or _rb_profile
-                agent_task = _rb_agent_state.get("task") or ""
-            _rb_process_video(webm, captions or None, profile=agent_prof, task=agent_task or None)
-        video_ready = bool(_rb_last_video)
-        _rb_agent_update(
-            running=False, done=True, video_ready=video_ready,
-            action="Video ready — click Download." if video_ready else "Done (no video).",
-        )
-
-_RB_AGENT_SCRIPT = r"""
-const { chromium } = require('PLAYWRIGHT_PATH');
-const { homedir } = require('os');
-const readline = require('readline');
-const path = require('path');
-
-let ctx = null, page = null;
-
-// ── Caption system ─────────────────────────────────────────────────────────
-// Captions are stored with ms-offset from recording start, returned on stop.
-let _captions = [];
-let _recordingStartMs = 0;
-function _addCaption(text, durationMs) {
-  if (!_recordingStartMs) return;
-  const startMs = Date.now() - _recordingStartMs;
-  _captions.push({ start: startMs, end: startMs + (durationMs || 3500), text });
-}
-
-// ── Cursor + click-ripple injection script ─────────────────────────────────
-// Injected via ctx.addInitScript() — runs on every page in the context.
-// Both elements are DOM nodes so they appear in Playwright's recordVideo output.
-const _CURSOR_RIPPLE_SCRIPT = `
-(function() {
-  'use strict';
-  var CURSOR_ID = '__amux_cursor__';
-  function _attachCursor() {
-    if (document.getElementById(CURSOR_ID)) return;
-    var el = document.createElement('div');
-    el.id = CURSOR_ID;
-    el.style.cssText = [
-      'position:fixed','pointer-events:none','z-index:2147483647',
-      'width:20px','height:20px','border-radius:50%',
-      'border:2.5px solid rgba(255,80,0,0.92)',
-      'background:rgba(255,80,0,0.18)',
-      'transform:translate(-50%,-50%)',
-      'transition:left 0.06s linear,top 0.06s linear',
-      'box-shadow:0 0 0 3px rgba(255,80,0,0.22)',
-      'left:-100px','top:-100px',
-    ].join(';');
-    document.body.appendChild(el);
-    return el;
-  }
-  var _cursorEl = null;
-  document.addEventListener('mousemove', function(e) {
-    if (!_cursorEl) _cursorEl = _attachCursor();
-    if (_cursorEl) { _cursorEl.style.left = e.clientX+'px'; _cursorEl.style.top = e.clientY+'px'; }
-  }, {capture:true, passive:true});
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function() { _cursorEl = _attachCursor(); });
-  } else { _cursorEl = _attachCursor(); }
-
-  var _styleEl = document.createElement('style');
-  _styleEl.textContent = '@keyframes __amux_ripple{0%{transform:translate(-50%,-50%) scale(0.2);opacity:1}100%{transform:translate(-50%,-50%) scale(2.8);opacity:0}}';
-  (document.head || document.documentElement).appendChild(_styleEl);
-  document.addEventListener('click', function(e) {
-    var r = document.createElement('div');
-    r.style.cssText = [
-      'position:fixed','pointer-events:none','z-index:2147483646',
-      'width:44px','height:44px','border-radius:50%',
-      'background:rgba(255,140,0,0.50)',
-      'border:3px solid rgba(255,140,0,0.88)',
-      'left:'+e.clientX+'px','top:'+e.clientY+'px',
-      'animation:__amux_ripple 0.65s ease-out forwards',
-    ].join(';');
-    document.body.appendChild(r);
-    setTimeout(function(){r.remove();}, 750);
-  }, {capture:true, passive:true});
-})();
-`;
-
-// ── Ghost cursor (smooth Bezier mouse movement) ────────────────────────────
-let _ghostCursor = null;
-try {
-  const gcPath = path.resolve(__dirname, 'node_modules/ghost-cursor-playwright');
-  const { createCursor } = require(gcPath);
-  _ghostCursor = createCursor;
-} catch(e) { /* not installed — fall back to linear interpolation */ }
-
-async function _smoothMove(targetPage, x, y) {
-  if (_ghostCursor && targetPage) {
-    try {
-      const cur = await _ghostCursor(targetPage);
-      await cur.actions.move({ x, y });
-      return;
-    } catch(e) { /* fallback */ }
-  }
-  // Linear interpolation fallback
-  const steps = 18;
-  for (let i = 1; i <= steps; i++) {
-    await targetPage.mouse.move(640 + (x - 640) * (i / steps), 400 + (y - 400) * (i / steps));
-    await targetPage.waitForTimeout(16);
-  }
-}
-
-function attachPageListeners(p) {
-  p.on('close', () => {
-    // If active page closed, switch to another open page
-    if (page === p && ctx) {
-      const pages = ctx.pages().filter(pg => !pg.isClosed());
-      if (pages.length > 0) page = pages[pages.length - 1];
-      else page = null;
-    }
-  });
-}
-
-function switchToPage(p) {
-  page = p;
-  attachPageListeners(p);
-}
-const PROFILES_DIR = homedir() + '/.amux/playwright-auth/profiles';
-const DEFAULT_PROFILE = homedir() + '/.amux/playwright-auth/profile';
-const VIDEOS_DIR = homedir() + '/.amux/browser-videos';
-const fs = require('fs');
-
-const rl = readline.createInterface({ input: process.stdin, terminal: false });
-rl.on('line', async (line) => {
-  let cmd;
-  try { cmd = JSON.parse(line); } catch(e) { respond({ok:false,error:'bad json'}); return; }
-  try {
-    switch (cmd.action) {
-      case 'start': {
-        if (ctx) { try { await ctx.close(); } catch(e) {} }
-        // Use named profile or default
-        let profilePath = DEFAULT_PROFILE;
-        if (cmd.profile) {
-          profilePath = PROFILES_DIR + '/' + cmd.profile.replace(/[^a-zA-Z0-9_-]/g, '');
-          fs.mkdirSync(profilePath, { recursive: true });
-        }
-        const headed = !!cmd.headed;
-        const record = !!cmd.record;
-        const ctxOpts = {
-          headless: !headed,
-          viewport: headed ? null : { width: 1280, height: 800 },
-          ignoreHTTPSErrors: true,
-          args: ['--no-first-run', '--disable-blink-features=AutomationControlled'],
-        };
-        if (record) {
-          fs.mkdirSync(VIDEOS_DIR, { recursive: true });
-          ctxOpts.recordVideo = { dir: VIDEOS_DIR, size: { width: 1280, height: 800 } };
-        }
-        ctx = await chromium.launchPersistentContext(profilePath, ctxOpts);
-        // Inject visible cursor + click-ripple into every page
-        if (record) {
-          await ctx.addInitScript(_CURSOR_RIPPLE_SCRIPT);
-          _captions = [];
-          _recordingStartMs = Date.now();
-        }
-        page = ctx.pages()[0] || await ctx.newPage();
-        attachPageListeners(page);
-        // Auto-switch to new tabs when they open
-        ctx.on('page', async (newPage) => {
-          switchToPage(newPage);
-          await newPage.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
-        });
-        if (cmd.url) {
-          await page.goto(cmd.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
-        }
-        respond({ ok: true, url: headed ? '' : page.url(), title: headed ? '' : await page.title(), profile: cmd.profile || 'default', headed });
-        break;
-      }
-      case 'navigate': {
-        if (!page) { respond({ok:false,error:'no page'}); break; }
-        await page.goto(cmd.url, { waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
-        await page.waitForTimeout(300);
-        respond({ ok: true, url: page.url(), title: await page.title() });
-        break;
-      }
-      case 'click': {
-        if (!page) { respond({ok:false,error:'no page'}); break; }
-        const pagesBefore = ctx ? ctx.pages().length : 0;
-        await page.mouse.move(cmd.x, cmd.y);
-        await page.waitForTimeout(150);
-        await page.mouse.click(cmd.x, cmd.y, { button: cmd.button || 'left' });
-        await page.waitForTimeout(400);
-        // If a new tab opened, ctx.on('page') already switched page; just wait for it to load
-        const pagesAfter = ctx ? ctx.pages().length : 0;
-        if (pagesAfter > pagesBefore) {
-          await page.waitForLoadState('domcontentloaded', {timeout: 8000}).catch(()=>{});
-          await page.waitForTimeout(500);
-        } else {
-          await page.waitForLoadState('domcontentloaded', {timeout: 5000}).catch(()=>{});
-          await page.waitForTimeout(800);
-        }
-        const tabs = ctx ? ctx.pages().filter(p => !p.isClosed()).map((p,i) => ({ i, url: p.url(), title: p.title() })) : [];
-        respond({ ok: true, url: page.url(), title: await page.title(), tabs });
-        break;
-      }
-      case 'type': {
-        if (!page) { respond({ok:false,error:'no page'}); break; }
-        await page.keyboard.type(cmd.text, { delay: 30 });
-        await page.waitForTimeout(200);
-        respond({ ok: true });
-        break;
-      }
-      case 'key': {
-        if (!page) { respond({ok:false,error:'no page'}); break; }
-        await page.keyboard.press(cmd.key);
-        await page.waitForTimeout(200);
-        respond({ ok: true });
-        break;
-      }
-      case 'scroll': {
-        if (!page) { respond({ok:false,error:'no page'}); break; }
-        await page.mouse.move(cmd.x || 640, cmd.y || 400);
-        await page.mouse.wheel(0, cmd.dy || 300);
-        await page.waitForTimeout(400);
-        respond({ ok: true });
-        break;
-      }
-      case 'smooth_move': {
-        if (!page) { respond({ok:false,error:'no page'}); break; }
-        await _smoothMove(page, cmd.x, cmd.y);
-        respond({ ok: true });
-        break;
-      }
-      case 'caption': {
-        // Add a timed caption to the recording (stored with ms offset from start)
-        _addCaption(cmd.text, cmd.duration_ms);
-        respond({ ok: true, count: _captions.length });
-        break;
-      }
-      case 'back': {
-        if (!page) { respond({ok:false,error:'no page'}); break; }
-        await page.goBack({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(()=>{});
-        await page.waitForTimeout(300);
-        respond({ ok: true, url: page.url(), title: await page.title() });
-        break;
-      }
-      case 'forward': {
-        if (!page) { respond({ok:false,error:'no page'}); break; }
-        await page.goForward({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(()=>{});
-        await page.waitForTimeout(300);
-        respond({ ok: true, url: page.url(), title: await page.title() });
-        break;
-      }
-      case 'reload': {
-        if (!page) { respond({ok:false,error:'no page'}); break; }
-        await page.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(()=>{});
-        await page.waitForTimeout(300);
-        respond({ ok: true, url: page.url(), title: await page.title() });
-        break;
-      }
-      case 'screenshot': {
-        if (!page) { respond({ok:false,error:'no page'}); break; }
-        const buf = await page.screenshot({ type: 'jpeg', quality: 70 });
-        const allPages = ctx ? ctx.pages().filter(p => !p.isClosed()) : [];
-        const tabIdx = allPages.indexOf(page);
-        const tabs = await Promise.all(allPages.map(async (p, i) => ({ i, url: p.url(), title: await p.title() })));
-        respond({ ok: true, data: buf.toString('base64'), url: page.url(), title: await page.title(), tabs, activeTab: tabIdx });
-        break;
-      }
-      case 'tabs': {
-        if (!ctx) { respond({ok:false,error:'no context'}); break; }
-        const allPages = ctx.pages().filter(p => !p.isClosed());
-        const activeIdx = allPages.indexOf(page);
-        const tabs = await Promise.all(allPages.map(async (p, i) => ({ i, url: p.url(), title: await p.title() })));
-        respond({ ok: true, tabs, activeTab: activeIdx });
-        break;
-      }
-      case 'switch_tab': {
-        if (!ctx) { respond({ok:false,error:'no context'}); break; }
-        const allPages = ctx.pages().filter(p => !p.isClosed());
-        const idx = cmd.index;
-        if (idx < 0 || idx >= allPages.length) { respond({ok:false,error:'tab index out of range'}); break; }
-        switchToPage(allPages[idx]);
-        await page.bringToFront().catch(()=>{});
-        const buf = await page.screenshot({ type: 'jpeg', quality: 70 });
-        const tabs = await Promise.all(allPages.map(async (p, i) => ({ i, url: p.url(), title: await p.title() })));
-        respond({ ok: true, data: buf.toString('base64'), url: page.url(), title: await page.title(), tabs, activeTab: idx });
-        break;
-      }
-      case 'close_tab': {
-        if (!ctx) { respond({ok:false,error:'no context'}); break; }
-        const allPages = ctx.pages().filter(p => !p.isClosed());
-        const idx = cmd.index !== undefined ? cmd.index : allPages.indexOf(page);
-        if (idx >= 0 && idx < allPages.length) {
-          const toClose = allPages[idx];
-          if (toClose === page) {
-            // Switch to adjacent tab before closing
-            const next = allPages[idx + 1] || allPages[idx - 1];
-            if (next) switchToPage(next);
-          }
-          await toClose.close().catch(()=>{});
-        }
-        const remaining = ctx.pages().filter(p => !p.isClosed());
-        const tabs = await Promise.all(remaining.map(async (p, i) => ({ i, url: p.url(), title: await p.title() })));
-        const activeIdx = page ? remaining.indexOf(page) : 0;
-        if (page && !page.isClosed()) {
-          const buf = await page.screenshot({ type: 'jpeg', quality: 70 });
-          respond({ ok: true, data: buf.toString('base64'), url: page.url(), title: await page.title(), tabs, activeTab: activeIdx });
-        } else {
-          respond({ ok: true, tabs, activeTab: activeIdx });
-        }
-        break;
-      }
-      case 'stop': {
-        let videoPath = null;
-        const capturesCopy = [..._captions];
-        if (ctx) {
-          try {
-            const vid = page && page.video ? page.video() : null;
-            await ctx.close();
-            if (vid) { try { videoPath = await vid.path(); } catch(e) {} }
-          } catch(e) {}
-          ctx = null; page = null;
-        }
-        _captions = []; _recordingStartMs = 0;
-        respond({ ok: true, videoPath, captions: capturesCopy });
-        process.exit(0);
-        break;
-      }
-      default:
-        respond({ ok: false, error: 'unknown action: ' + cmd.action });
-    }
-  } catch(e) {
-    respond({ ok: false, error: e.message });
-  }
-});
-
-function respond(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
-}
-process.on('SIGTERM', () => { if (ctx) ctx.close().finally(() => process.exit(0)); });
-"""
-
-def _rb_send(cmd: dict, timeout: float = 20.0) -> dict:
-    """Send a command to the remote browser child process and return the JSON response."""
-    global _rb_proc
-    with _rb_lock:
-        if _rb_proc is None or _rb_proc.poll() is not None:
-            if cmd.get("action") != "start":
-                return {"ok": False, "error": "browser not running"}
-            # Start the child process
-            pw_path = str(Path(__file__).resolve().parent / "node_modules" / "playwright")
-            script = _RB_AGENT_SCRIPT.replace("PLAYWRIGHT_PATH", pw_path.replace("\\", "/"))
-            _rb_proc = subprocess.Popen(
-                ["node", "-e", script],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1,
-            )
-        proc = _rb_proc
-        try:
-            proc.stdin.write(json.dumps(cmd) + "\n")
-            proc.stdin.flush()
-            # Read one line of response (with timeout)
-            import select
-            ready, _, _ = select.select([proc.stdout], [], [], timeout)
-            if not ready:
-                return {"ok": False, "error": "timeout"}
-            line = proc.stdout.readline()
-            if not line:
-                _rb_proc = None
-                return {"ok": False, "error": "process exited"}
-            return json.loads(line)
-        except Exception as e:
-            _rb_proc = None
-            return {"ok": False, "error": str(e)}
-
 # Per-session token cache — refreshed every 30s, keyed by resolved dir
 _token_cache = {"data": {}, "timestamps": {}, "time": 0}
 _TOKEN_CACHE_TTL = 120
@@ -3616,100 +3028,6 @@ curl -sk -X POST -H 'Content-Type: application/json' \\
 curl -sk -X DELETE $AMUX_URL/api/notes/my-note
 ```
 
-### Browser automation — use the amux browser API (preferred)
-
-The amux browser is a shared Playwright instance accessible via the REST API. **This is the preferred way to automate browsers** — it uses saved auth profiles, supports screenshots, and sessions can share the same browser context.
-
-```bash
-# 1. Start browser with saved auth profile (default or named)
-curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"profile":"default","url":"https://example.com"}' \
-  $AMUX_URL/api/browser/start
-
-# 2. Navigate
-curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"url":"https://example.com/dashboard"}' \
-  $AMUX_URL/api/browser/navigate
-
-# 3. Take a screenshot — always returns JSON with path (NEVER use -o file.jpg)
-result=$(curl -sk "$AMUX_URL/api/browser/screenshot")
-path=$(echo "$result" | python3 -c "import sys,json; print(json.load(sys.stdin)['path'])")
-# Then: Read $path  (guaranteed valid JPEG at ~/.amux/browser-screenshots/latest.jpg)
-
-# 4. Click at coordinates
-curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"action":"click","x":640,"y":400}' \
-  $AMUX_URL/api/browser/action
-
-# 5. Type text
-curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"action":"type","text":"hello world"}' \
-  $AMUX_URL/api/browser/action
-
-# 6. Press a key (Enter, Tab, Escape, ArrowDown, etc.)
-curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"action":"key","key":"Enter"}' \
-  $AMUX_URL/api/browser/action
-
-# 7. Scroll (dy > 0 = down)
-curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"action":"scroll","dy":500}' \
-  $AMUX_URL/api/browser/action
-
-# 8. Evaluate JavaScript — returns result as JSON
-curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"action":"eval","script":"document.title"}' \
-  $AMUX_URL/api/browser/action
-
-# 9. List available auth profiles
-curl -sk $AMUX_URL/api/browser/profiles
-
-# 10. AI agent — give it a task in plain English, it drives the browser autonomously
-curl -sk -X POST -H 'Content-Type: application/json' \
-  -d '{"task":"Log in and find the latest invoice","profile":"default"}' \
-  $AMUX_URL/api/browser/agent
-# Poll for completion:
-curl -sk $AMUX_URL/api/browser/agent/status
-
-# 11. Stop browser
-curl -sk -X POST $AMUX_URL/api/browser/stop
-```
-
-**Use raw Playwright** (`launchPersistentContext`) only when you need parallel browsers or the amux browser is busy. In that case, always use:
-```javascript
-const ctx = await chromium.launchPersistentContext(
-  `${homedir()}/.amux/playwright-auth/profile`,   // default profile
-  { headless: true, ignoreHTTPSErrors: true }
-);
-```
-
-### Browser automation — always use saved auth profiles
-
-When you need to control a browser with Playwright, **always** use `launchPersistentContext` with the amux auth profile so you get saved cookies and logged-in sessions. Never use `chromium.launch()` — that opens a fresh anonymous browser with no auth.
-
-```javascript
-const { chromium } = require('playwright');
-const { homedir } = require('os');
-
-// Default profile (use this unless you need a specific named profile)
-const ctx = await chromium.launchPersistentContext(
-  `${homedir()}/.amux/playwright-auth/profile`,
-  { headless: true, ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } }
-);
-
-// Named profile (e.g. 'google', 'mixpeek-studio')
-const ctx = await chromium.launchPersistentContext(
-  `${homedir()}/.amux/playwright-auth/profiles/google`,
-  { headless: true, ignoreHTTPSErrors: true, viewport: { width: 1280, height: 800 } }
-);
-
-const page = ctx.pages()[0] || await ctx.newPage();
-// ... do your automation ...
-await ctx.close();
-```
-
-To capture/save auth for a new site: use the `/playwright-auth` skill in amux.
-
 ### Google Drive — use the API, not Chrome MCP
 
 Always use the Drive REST API directly. Do NOT open drive.google.com in Chrome MCP — that is slow and fragile.
@@ -4124,17 +3442,13 @@ def start_session(name: str, extra_flags: str = "", _skip_conv_id: bool = False)
         cmd += f" {session_flag}"
     if extra_flags:
         cmd += f" {extra_flags}"
-    # Inject --mcp-config based on CC_MCP setting (chrome, playwright, both, or empty)
+    # Inject --mcp-config based on CC_MCP setting (chrome or empty)
     mcp_val = cfg.get("CC_MCP", "").strip().lower()
     mcp_dir = CC_HOME  # ~/.amux
-    if mcp_val in ("chrome", "both"):
+    if mcp_val == "chrome":
         mcp_chrome = mcp_dir / "mcp-chrome.json"
         if mcp_chrome.exists():
             cmd += f" --mcp-config {shlex.quote(str(mcp_chrome))}"
-    if mcp_val in ("playwright", "both"):
-        mcp_pw = mcp_dir / "mcp-playwright.json"
-        if mcp_pw.exists():
-            cmd += f" --mcp-config {shlex.quote(str(mcp_pw))}"
     # Default to sonnet if no --model specified anywhere
     if "--model" not in cmd:
         cmd += " --model sonnet"
@@ -7844,7 +7158,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-scheduler" onclick="switchView('scheduler')">Scheduler</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
   <button id="tab-logs" onclick="switchView('logs')">Logs</button>
-  <button id="tab-browser" onclick="switchView('browser')">Browser</button>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
   <button id="tab-email" onclick="switchView('email')">Email</button>
   <button id="tab-notes" onclick="switchView('notes')">Notes</button>
@@ -8098,93 +7411,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </div>
 
-<div id="browser-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
-  <!-- Profile bar -->
-  <div style="padding:4px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);flex-shrink:0;font-size:0.72rem;">
-    <span style="color:var(--dim);">Profile:</span>
-    <select id="rb-profile" onchange="_rbSwitchProfile(this.value)" style="font-size:0.72rem;padding:2px 6px;background:var(--card-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;">
-      <option value="default">default</option>
-    </select>
-    <button class="btn" id="rb-new-btn" onclick="_rbShowNewProfile()" style="font-size:0.6rem;padding:1px 6px;">+ New</button>
-    <span id="rb-new-profile-form" style="display:none;align-items:center;gap:4px;">
-      <input id="rb-new-profile-name" type="text" placeholder="profile name" autocomplete="off"
-        style="font-size:0.7rem;padding:2px 6px;width:110px;background:var(--card-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;"
-        onkeydown="if(event.key==='Enter')_rbCreateProfile();if(event.key==='Escape')_rbHideNewProfile()">
-      <button class="btn primary" onclick="_rbCreateProfile()" style="font-size:0.6rem;padding:1px 7px;">Create</button>
-      <button class="btn" onclick="_rbHideNewProfile()" style="font-size:0.6rem;padding:1px 6px;">&#x2715;</button>
-    </span>
-    <button class="btn" id="rb-del-profile" onclick="_rbDeleteProfile()" style="font-size:0.6rem;padding:1px 6px;color:var(--red);display:none;" title="Delete profile">&#x2715;</button>
-    <button class="btn" onclick="_rbExportProfile()" style="font-size:0.6rem;padding:1px 6px;" title="Export profile as zip backup">&#x2913; Export</button>
-    <label class="btn" style="font-size:0.6rem;padding:1px 6px;cursor:pointer;" title="Import profile from zip backup">&#x2912; Import<input type="file" accept=".zip" style="display:none" onchange="_rbImportProfile(this)"></label>
-    <span id="rb-profile-state" style="font-size:0.72rem;line-height:1;" title="Profile has saved login state"></span>
-    <button class="btn" id="rb-login-btn" onclick="_rbShowLoginUrl()" style="font-size:0.6rem;padding:1px 8px;" title="Log in and save credentials to this profile">&#x1F511; Login</button>
-    <span id="rb-login-url-form" style="display:none;align-items:center;gap:4px;">
-      <input id="rb-login-url" type="text" placeholder="https://site.com/login" autocomplete="off"
-        style="font-size:0.7rem;padding:2px 6px;width:160px;background:var(--card-bg);color:var(--fg);border:1px solid var(--border);border-radius:4px;"
-        onkeydown="if(event.key==='Enter')_rbDoLogin();if(event.key==='Escape')_rbHideLoginUrl()">
-      <button class="btn primary" onclick="_rbDoLogin()" style="font-size:0.6rem;padding:1px 7px;">Open</button>
-      <button class="btn" onclick="_rbHideLoginUrl()" style="font-size:0.6rem;padding:1px 6px;">&#x2715;</button>
-    </span>
-    <button class="btn" id="rb-rec-btn" onclick="_rbToggleRecord()" style="font-size:0.6rem;padding:1px 8px;" title="Toggle video recording (takes effect on next launch)">&#x23FA; Rec</button>
-    <button class="btn" onclick="openRecordingsDir()" style="font-size:0.6rem;padding:1px 8px;" title="Browse saved recordings">&#x1F3A5; Recordings</button>
-    <span id="rb-profile-status" style="color:var(--dim);margin-left:auto;"></span>
-  </div>
-  <!-- Recording download banner -->
-  <div id="rb-video-banner" style="display:none;padding:5px 12px;background:var(--card-bg);border-bottom:1px solid var(--border);font-size:0.72rem;display:none;align-items:center;gap:8px;">
-    <span>&#x1F3A5; Recording ready —</span>
-    <a id="rb-video-link" href="/api/browser/video" download style="color:var(--accent);text-decoration:none;font-weight:600;">Download MP4</a>
-    <button class="btn" onclick="document.getElementById('rb-video-banner').style.display='none'" style="font-size:0.6rem;padding:1px 6px;margin-left:auto;">&#x2715;</button>
-  </div>
-  <!-- Tab bar (hidden when only 1 tab) -->
-  <div id="rb-tab-bar" style="display:none;padding:0 12px;border-bottom:1px solid var(--border);flex-shrink:0;overflow-x:auto;white-space:nowrap;background:var(--bg);">
-  </div>
-  <!-- URL bar -->
-  <div style="padding:6px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);flex-shrink:0;">
-    <button class="btn" onclick="_rbCmd('back')" style="font-size:0.8rem;padding:2px 6px;" title="Back">&#x25C0;</button>
-    <button class="btn" onclick="_rbCmd('forward')" style="font-size:0.8rem;padding:2px 6px;" title="Forward">&#x25B6;</button>
-    <button class="btn" onclick="_rbCmd('reload')" style="font-size:0.8rem;padding:2px 6px;" title="Reload">&#x21BB;</button>
-    <input id="rb-url" type="text" placeholder="https://example.com" autocomplete="off"
-      style="flex:1;font-size:0.8rem;font-family:monospace;padding:5px 8px;"
-      onkeydown="if(event.key==='Enter'){_rbNavigate(this.value);}">
-    <button class="btn" onclick="_rbNavigate(document.getElementById('rb-url').value)" style="font-size:0.75rem;padding:3px 10px;">Go</button>
-    <span id="rb-status" style="font-size:0.7rem;color:var(--dim);min-width:50px;text-align:right;"></span>
-  </div>
-  <!-- Agent bar -->
-  <div style="padding:5px 12px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);flex-shrink:0;background:color-mix(in srgb,var(--card-bg) 60%,transparent);">
-    <span style="font-size:0.65rem;color:var(--dim);white-space:nowrap;">&#x1F916; Agent:</span>
-    <input id="rb-agent-input" type="text" placeholder='e.g. "search YouTube for lo-fi music and play the first result"'
-      style="flex:1;font-size:0.72rem;padding:3px 8px;"
-      onkeydown="if(event.key==='Enter')_rbRunAgent()">
-    <button class="btn primary" id="rb-agent-run" onclick="_rbRunAgent()" style="font-size:0.68rem;padding:3px 10px;white-space:nowrap;">&#x25B6; Run</button>
-    <button class="btn" id="rb-agent-stop" onclick="_rbStopAgent()" style="font-size:0.68rem;padding:3px 8px;color:var(--red);display:none;">&#x23F9; Stop</button>
-    <span id="rb-agent-status" style="font-size:0.65rem;color:var(--dim);white-space:nowrap;max-width:180px;overflow:hidden;text-overflow:ellipsis;"></span>
-  </div>
-  <!-- Viewport -->
-  <div id="rb-viewport-wrap" style="flex:1;min-height:0;overflow:hidden;position:relative;background:#1a1a2e;display:flex;align-items:center;justify-content:center;">
-    <div id="rb-placeholder" style="color:var(--dim);font-size:0.9rem;text-align:center;padding:40px;">
-      <div style="font-size:2rem;margin-bottom:12px;">&#x1F310;</div>
-      <div>Remote Browser</div>
-      <div style="font-size:0.75rem;margin-top:8px;">Enter a URL above or</div>
-      <button class="btn primary" onclick="_rbStart()" style="margin-top:12px;font-size:0.8rem;padding:6px 16px;">Launch Browser</button>
-    </div>
-    <div id="rb-login-panel" style="display:none;text-align:center;padding:40px;color:var(--fg);">
-      <div style="font-size:2.5rem;margin-bottom:16px;">&#x1F511;</div>
-      <div style="font-weight:600;font-size:1rem;margin-bottom:8px;">Browser window open on your desktop</div>
-      <div style="font-size:0.8rem;color:var(--dim);margin-bottom:24px;max-width:320px;margin-left:auto;margin-right:auto;">Log in to your accounts, then click Done to save your credentials to this profile.</div>
-      <button class="btn primary" onclick="_rbLoginDone()" style="font-size:0.85rem;padding:8px 24px;">Done — Save & Close</button>
-    </div>
-    <img id="rb-screen" style="display:none;max-width:100%;max-height:100%;cursor:crosshair;image-rendering:auto;user-select:none;-webkit-user-select:none;"
-      onclick="_rbClick(event)" oncontextmenu="event.preventDefault();_rbClick(event,true)">
-  </div>
-  <!-- Input bar -->
-  <div style="padding:6px 12px;display:flex;align-items:center;gap:6px;border-top:1px solid var(--border);flex-shrink:0;">
-    <input id="rb-type-input" type="text" placeholder="Type text and press Enter to send keystrokes..."
-      style="flex:1;font-size:0.8rem;padding:5px 8px;"
-      onkeydown="_rbTypeKey(event)">
-    <button class="btn" onclick="_rbCmd('screenshot')" style="font-size:0.7rem;padding:3px 8px;" title="Refresh screenshot">&#x1F4F7;</button>
-    <button class="btn" onclick="_rbStop()" style="font-size:0.7rem;padding:3px 8px;color:var(--red);" title="Close browser">&#x2716;</button>
-  </div>
-</div>
 
 <!-- Notes view -->
 <div id="notes-view" style="display:none;flex-direction:row;overflow:hidden;">
@@ -12230,7 +11456,6 @@ const SLASH_COMMANDS = [
   { cmd: '/amux', desc: 'Interact with amux — board, memory, sessions' },
   { cmd: '/amux-board', desc: 'Add a task or note to the board' },
   { cmd: '/pw-test', desc: 'Run Playwright UI tests or investigate issues' },
-  { cmd: '/playwright-auth', desc: 'Capture/sync browser auth profiles' },
 ];
 let slashAcItems = [];
 let slashAcSelected = -1;
@@ -12818,529 +12043,6 @@ async function copyFileContent() {
   const btn = document.getElementById('file-tab-copy');
   btn.textContent = 'Copied!';
   setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
-}
-
-// ═══════ REMOTE BROWSER ═══════
-let _rbActive = false;
-let _rbLoading = false;
-let _rbCurrentProfile = 'default';
-let _rbLoginMode = false;
-let _rbRecordEnabled = false;  // whether to record on next launch
-
-async function _rbLoadProfiles() {
-  try {
-    const r = await fetch(API + '/api/browser/profiles');
-    const d = await r.json();
-    const sel = document.getElementById('rb-profile');
-    sel.innerHTML = '';
-    for (const p of (d.profiles || [])) {
-      const opt = document.createElement('option');
-      opt.value = p.name;
-      opt.textContent = p.name;
-      opt.dataset.hasState = p.has_state ? '1' : '';
-      sel.appendChild(opt);
-    }
-    // Preserve an already-selected profile; only fall back to server's active on initial load
-    const serverActive = d.active || 'default';
-    const validNames = (d.profiles || []).map(p => p.name);
-    if (!_rbCurrentProfile || !validNames.includes(_rbCurrentProfile)) {
-      _rbCurrentProfile = serverActive;
-    }
-    sel.value = _rbCurrentProfile;
-    document.getElementById('rb-del-profile').style.display = _rbCurrentProfile !== 'default' ? '' : 'none';
-    _rbUpdateProfileState(d.profiles || []);
-  } catch(e) {}
-}
-
-function _rbUpdateProfileState(profiles) {
-  const current = profiles.find(p => p.name === _rbCurrentProfile);
-  const dot = document.getElementById('rb-profile-state');
-  if (dot) {
-    dot.textContent = current?.has_state ? '🟢' : '⚪';
-    dot.title = current?.has_state ? 'Logged in — credentials saved' : 'No saved login for this profile';
-  }
-}
-
-function _rbShowNewProfile() {
-  document.getElementById('rb-new-btn').style.display = 'none';
-  const form = document.getElementById('rb-new-profile-form');
-  form.style.display = 'flex';
-  document.getElementById('rb-new-profile-name').value = '';
-  document.getElementById('rb-new-profile-name').focus();
-}
-
-function _rbHideNewProfile() {
-  document.getElementById('rb-new-btn').style.display = '';
-  document.getElementById('rb-new-profile-form').style.display = 'none';
-}
-
-async function _rbCreateProfile() {
-  const inp = document.getElementById('rb-new-profile-name');
-  const clean = inp.value.trim().replace(/[^a-zA-Z0-9_-]/g, '-');
-  if (!clean || clean === 'default') return;
-  _rbHideNewProfile();
-  try {
-    const r = await fetch(API + '/api/browser/profiles', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ name: clean }),
-    });
-    if (r.ok) {
-      await _rbLoadProfiles();
-      document.getElementById('rb-profile').value = clean;
-      _rbSwitchProfile(clean);
-    }
-  } catch(e) {}
-}
-
-async function _rbDeleteProfile() {
-  const sel = document.getElementById('rb-profile');
-  const name = sel.value;
-  if (name === 'default') return;
-  if (!confirm('Delete profile "' + name + '"? All saved cookies and sessions will be lost.')) return;
-  try {
-    await fetch(API + '/api/browser/profiles/' + encodeURIComponent(name), { method: 'DELETE' });
-    if (_rbActive) await _rbStop();
-    await _rbLoadProfiles();
-  } catch(e) {}
-}
-
-async function _rbExportProfile() {
-  const name = document.getElementById('rb-profile').value || 'default';
-  const a = document.createElement('a');
-  a.href = API + '/api/browser/profiles/' + encodeURIComponent(name) + '/export';
-  a.download = name + '-profile.zip';
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-}
-
-async function _rbImportProfile(input) {
-  const file = input.files[0];
-  if (!file) return;
-  const name = document.getElementById('rb-profile').value || 'default';
-  const status = document.getElementById('rb-profile-status');
-  status.textContent = 'Importing…';
-  try {
-    const r = await fetch(API + '/api/browser/profiles/' + encodeURIComponent(name) + '/import', {
-      method: 'POST', body: file, headers: { 'Content-Type': 'application/zip', 'Content-Length': file.size }
-    });
-    const d = await r.json();
-    status.textContent = d.ok ? 'Imported.' : ('Error: ' + d.error);
-    setTimeout(() => { status.textContent = ''; }, 3000);
-    await _rbLoadProfiles();
-  } catch(e) { status.textContent = 'Import failed'; }
-  input.value = '';
-}
-
-async function _rbSwitchProfile(name) {
-  _rbCurrentProfile = name;
-  document.getElementById('rb-del-profile').style.display = name !== 'default' ? '' : 'none';
-  document.getElementById('rb-profile-status').textContent = '';
-  await _rbLoadProfiles();
-  // If browser is running, restart with new profile
-  if (_rbActive) {
-    await _rbStop();
-    await _rbStart();
-  }
-}
-
-async function _rbStart(url) {
-  const status = document.getElementById('rb-status');
-  status.textContent = 'Starting...';
-  _rbLoading = true;
-  try {
-    const body = { url: url || '' };
-    if (_rbCurrentProfile && _rbCurrentProfile !== 'default') body.profile = _rbCurrentProfile;
-    if (_rbRecordEnabled) body.record = true;
-    const r = await fetch(API + '/api/browser/start', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    const d = await r.json();
-    if (!d.ok) { status.textContent = d.error || 'Failed'; _rbLoading = false; return; }
-    _rbActive = true;
-    if (d.profile) {
-      _rbCurrentProfile = d.profile;
-      document.getElementById('rb-profile').value = d.profile;
-    }
-    const recLabel = _rbRecordEnabled ? ' \u25CF REC' : '';
-    document.getElementById('rb-profile-status').textContent = 'Active: ' + _rbCurrentProfile + recLabel;
-    if (_rbRecordEnabled) document.getElementById('rb-profile-status').style.color = 'var(--red)';
-    status.textContent = '';
-    document.getElementById('rb-video-banner').style.display = 'none';
-    document.getElementById('rb-placeholder').style.display = 'none';
-    document.getElementById('rb-screen').style.display = 'block';
-    await _rbRefresh();
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-  }
-  _rbLoading = false;
-}
-
-async function _rbStop() {
-  let videoReady = false;
-  try {
-    const r = await fetch(API + '/api/browser/stop', { method: 'POST' });
-    const d = await r.json().catch(() => ({}));
-    videoReady = !!d.videoReady;
-  } catch(e) {}
-  _rbActive = false;
-  _rbLoginMode = false;
-  document.getElementById('rb-screen').style.display = 'none';
-  document.getElementById('rb-screen').src = '';
-  document.getElementById('rb-login-panel').style.display = 'none';
-  document.getElementById('rb-placeholder').style.display = '';
-  document.getElementById('rb-url').value = '';
-  document.getElementById('rb-status').textContent = '';
-  document.getElementById('rb-tab-bar').style.display = 'none';
-  document.getElementById('rb-tab-bar').innerHTML = '';
-  const ps = document.getElementById('rb-profile-status');
-  ps.textContent = '';
-  ps.style.color = '';
-  _rbSetRecord(_rbRecordEnabled); // re-sync button state
-  if (videoReady) {
-    const banner = document.getElementById('rb-video-banner');
-    document.getElementById('rb-video-link').href = API + '/api/browser/video?t=' + Date.now();
-    banner.style.display = 'flex';
-  }
-}
-
-function _rbToggleRecord() {
-  _rbSetRecord(!_rbRecordEnabled);
-}
-
-function _rbSetRecord(enabled) {
-  _rbRecordEnabled = enabled;
-  const btn = document.getElementById('rb-rec-btn');
-  if (!btn) return;
-  if (enabled) {
-    btn.style.color = 'var(--red)';
-    btn.style.fontWeight = '700';
-    btn.title = 'Recording ON — will record on next launch (click to disable)';
-  } else {
-    btn.style.color = '';
-    btn.style.fontWeight = '';
-    btn.title = 'Toggle video recording (takes effect on next launch)';
-  }
-}
-
-function _rbShowLoginUrl() {
-  document.getElementById('rb-login-btn').style.display = 'none';
-  const form = document.getElementById('rb-login-url-form');
-  form.style.display = 'flex';
-  const inp = document.getElementById('rb-login-url');
-  inp.value = '';
-  inp.focus();
-}
-
-function _rbHideLoginUrl() {
-  document.getElementById('rb-login-btn').style.display = '';
-  document.getElementById('rb-login-url-form').style.display = 'none';
-}
-
-async function _rbDoLogin() {
-  const url = document.getElementById('rb-login-url').value.trim();
-  _rbHideLoginUrl();
-  if (_rbActive) await _rbStop();
-  const status = document.getElementById('rb-status');
-  status.textContent = 'Opening...';
-  try {
-    const body = { headed: true };
-    if (_rbCurrentProfile && _rbCurrentProfile !== 'default') body.profile = _rbCurrentProfile;
-    if (url) body.url = url;
-    const r = await fetch(API + '/api/browser/start', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(body),
-    });
-    const d = await r.json();
-    if (!d.ok) { status.textContent = d.error || 'Failed'; return; }
-    _rbActive = true;
-    _rbLoginMode = true;
-    if (d.profile) {
-      _rbCurrentProfile = d.profile;
-      document.getElementById('rb-profile').value = d.profile;
-    }
-    document.getElementById('rb-placeholder').style.display = 'none';
-    document.getElementById('rb-screen').style.display = 'none';
-    document.getElementById('rb-login-panel').style.display = '';
-    document.getElementById('rb-profile-status').textContent = 'Login window open — navigate and log in, then click Done';
-    status.textContent = '';
-  } catch(e) {
-    status.textContent = 'Error: ' + e.message;
-  }
-}
-
-async function _rbLoginDone() {
-  await _rbStop();
-  await _rbLoadProfiles();  // refresh state dot
-  const ps = document.getElementById('rb-profile-status');
-  ps.textContent = 'Credentials saved for ' + _rbCurrentProfile;
-  setTimeout(() => { if (ps.textContent.startsWith('Credentials')) ps.textContent = ''; }, 3000);
-}
-
-async function openRecordingsDir() {
-  try {
-    const r = await fetch(API + '/api/recordings');
-    const d = await r.json();
-    openExplore(d.dir || null, null);
-  } catch(e) { openExplore(null, null); }
-}
-
-// ── Browser agent ──
-let _rbAgentRunning = false;
-let _rbAgentPollTimer = null;
-
-async function _rbRunAgent() {
-  const input = document.getElementById('rb-agent-input');
-  const task = input.value.trim();
-  if (!task) { input.focus(); return; }
-  if (_rbAgentRunning) return;
-
-  // Stop any active manual browser first
-  if (_rbActive) await _rbStop();
-
-  _rbAgentRunning = true;
-  document.getElementById('rb-agent-run').style.display = 'none';
-  document.getElementById('rb-agent-stop').style.display = '';
-  document.getElementById('rb-agent-status').textContent = 'Starting…';
-  document.getElementById('rb-video-banner').style.display = 'none';
-  document.getElementById('rb-placeholder').style.display = 'none';
-  document.getElementById('rb-screen').style.display = 'block';
-
-  try {
-    const body = { task };
-    if (_rbCurrentProfile && _rbCurrentProfile !== 'default') body.profile = _rbCurrentProfile;
-    const r = await fetch(API + '/api/browser/agent', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(body),
-    });
-    const d = await r.json();
-    if (!d.ok) { _rbAgentDone(d.error || 'Failed to start'); return; }
-    // Start polling
-    _rbAgentPollTimer = setInterval(_rbPollAgent, 1500);
-  } catch(e) {
-    _rbAgentDone('Error: ' + e.message);
-  }
-}
-
-async function _rbPollAgent() {
-  try {
-    const r = await fetch(API + '/api/browser/agent/status');
-    const d = await r.json();
-    document.getElementById('rb-agent-status').textContent = d.action || '';
-    // Refresh screenshot while agent is doing things
-    if (d.running) {
-      await _rbRefresh().catch(() => {});
-    }
-    if (!d.running) {
-      clearInterval(_rbAgentPollTimer);
-      _rbAgentPollTimer = null;
-      // Final screenshot
-      await _rbRefresh().catch(() => {});
-      if (d.video_ready) {
-        const banner = document.getElementById('rb-video-banner');
-        document.getElementById('rb-video-link').href = API + '/api/browser/video?t=' + Date.now();
-        banner.style.display = 'flex';
-      }
-      _rbAgentDone(d.error || (d.video_ready ? 'Done — video ready' : 'Done'));
-    }
-  } catch(e) {}
-}
-
-function _rbAgentDone(msg) {
-  _rbAgentRunning = false;
-  document.getElementById('rb-agent-run').style.display = '';
-  document.getElementById('rb-agent-stop').style.display = 'none';
-  document.getElementById('rb-agent-status').textContent = msg || '';
-  // Browser is already stopped by server — reset local state
-  _rbActive = false;
-}
-
-async function _rbStopAgent() {
-  try { await fetch(API + '/api/browser/agent/stop', { method: 'POST' }); } catch(e) {}
-  clearInterval(_rbAgentPollTimer);
-  _rbAgentPollTimer = null;
-  _rbAgentDone('Stopped');
-  document.getElementById('rb-placeholder').style.display = '';
-  document.getElementById('rb-screen').style.display = 'none';
-  document.getElementById('rb-screen').src = '';
-}
-
-function _rbRenderTabs(tabs, activeTab) {
-  const bar = document.getElementById('rb-tab-bar');
-  if (!bar) return;
-  if (!tabs || tabs.length <= 1) { bar.style.display = 'none'; return; }
-  bar.style.display = 'flex';
-  bar.style.alignItems = 'stretch';
-  bar.style.gap = '2px';
-  bar.style.padding = '4px 8px 0';
-  bar.innerHTML = tabs.map((t, i) => {
-    const active = i === activeTab;
-    const label = t.title || t.url || ('Tab ' + (i+1));
-    const short = label.length > 22 ? label.substring(0, 20) + '…' : label;
-    return `<div style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px 4px 10px;font-size:0.7rem;cursor:pointer;border-radius:6px 6px 0 0;border:1px solid ${active ? 'var(--border)' : 'transparent'};border-bottom:${active ? '1px solid var(--bg)' : 'none'};background:${active ? 'var(--bg)' : 'var(--card-bg)'};color:${active ? 'var(--fg)' : 'var(--dim)'};white-space:nowrap;margin-bottom:-1px;"
-      onclick="_rbSwitchTab(${i})" title="${t.url || ''}">
-      <span>${short}</span>
-      <span onclick="event.stopPropagation();_rbCloseTab(${i})" style="margin-left:2px;opacity:0.5;font-size:0.65rem;padding:0 2px;border-radius:3px;" onmouseenter="this.style.opacity='1'" onmouseleave="this.style.opacity='0.5'">✕</span>
-    </div>`;
-  }).join('');
-}
-
-async function _rbSwitchTab(index) {
-  if (!_rbActive) return;
-  const status = document.getElementById('rb-status');
-  status.textContent = 'Switching...';
-  try {
-    const r = await fetch(API + '/api/browser/action', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ action: 'switch_tab', index }),
-    });
-    const d = await r.json();
-    if (d.url) document.getElementById('rb-url').value = d.url;
-    if (d.title) status.textContent = d.title;
-    if (d.data) {
-      const img = document.getElementById('rb-screen');
-      const blob = new Blob([Uint8Array.from(atob(d.data), c => c.charCodeAt(0))], {type:'image/jpeg'});
-      const old = img.src;
-      img.src = URL.createObjectURL(blob);
-      if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
-    }
-    _rbRenderTabs(d.tabs, d.activeTab);
-  } catch(e) { status.textContent = 'Error'; }
-}
-
-async function _rbCloseTab(index) {
-  if (!_rbActive) return;
-  try {
-    const r = await fetch(API + '/api/browser/action', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ action: 'close_tab', index }),
-    });
-    const d = await r.json();
-    if (d.url) document.getElementById('rb-url').value = d.url;
-    if (d.title) document.getElementById('rb-status').textContent = d.title;
-    if (d.data) {
-      const img = document.getElementById('rb-screen');
-      const blob = new Blob([Uint8Array.from(atob(d.data), c => c.charCodeAt(0))], {type:'image/jpeg'});
-      const old = img.src;
-      img.src = URL.createObjectURL(blob);
-      if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
-    }
-    _rbRenderTabs(d.tabs, d.activeTab);
-  } catch(e) {}
-}
-
-async function _rbRefresh() {
-  if (!_rbActive) return;
-  const img = document.getElementById('rb-screen');
-  const status = document.getElementById('rb-status');
-  try {
-    const r = await fetch(API + '/api/browser/screenshot?raw=1&t=' + Date.now());
-    if (!r.ok) { status.textContent = 'Screenshot failed'; return; }
-    const blob = await r.blob();
-    const old = img.src;
-    img.src = URL.createObjectURL(blob);
-    if (old && old.startsWith('blob:')) URL.revokeObjectURL(old);
-    // Update URL bar with current page URL
-    const info = r.headers.get('X-Page-Url');
-    if (info) document.getElementById('rb-url').value = info;
-    const title = r.headers.get('X-Page-Title');
-    if (title) status.textContent = decodeURIComponent(title);
-    // Render tab bar
-    const tabsHdr = r.headers.get('X-Tabs');
-    const activeHdr = r.headers.get('X-Active-Tab');
-    if (tabsHdr) {
-      try { _rbRenderTabs(JSON.parse(tabsHdr), parseInt(activeHdr || '0', 10)); } catch(e) {}
-    }
-  } catch(e) {
-    status.textContent = 'Offline';
-  }
-}
-
-async function _rbNavigate(url) {
-  if (!url) return;
-  if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-  document.getElementById('rb-url').value = url;
-  if (!_rbActive) { await _rbStart(url); return; }
-  const status = document.getElementById('rb-status');
-  status.textContent = 'Loading...';
-  try {
-    const r = await fetch(API + '/api/browser/navigate', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ url }),
-    });
-    const d = await r.json();
-    if (d.url) document.getElementById('rb-url').value = d.url;
-    if (d.title) status.textContent = d.title;
-  } catch(e) { status.textContent = 'Error'; }
-  await _rbRefresh();
-}
-
-async function _rbCmd(action) {
-  if (!_rbActive) return;
-  const status = document.getElementById('rb-status');
-  try {
-    await fetch(API + '/api/browser/action', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ action }),
-    });
-  } catch(e) {}
-  await _rbRefresh();
-}
-
-function _rbClick(event, rightClick) {
-  if (!_rbActive) return;
-  const img = event.target;
-  const rect = img.getBoundingClientRect();
-  // Scale click coordinates from displayed size to actual viewport size (1280x800)
-  const scaleX = img.naturalWidth / rect.width;
-  const scaleY = img.naturalHeight / rect.height;
-  const x = Math.round((event.clientX - rect.left) * scaleX);
-  const y = Math.round((event.clientY - rect.top) * scaleY);
-  const status = document.getElementById('rb-status');
-  status.textContent = 'Click ' + x + ',' + y + '...';
-  fetch(API + '/api/browser/action', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ action: 'click', x, y, button: rightClick ? 'right' : 'left' }),
-  }).then(() => _rbRefresh()).catch(() => { status.textContent = 'Error'; });
-}
-
-function _rbTypeKey(event) {
-  if (!_rbActive) return;
-  if (event.key === 'Enter') {
-    event.preventDefault();
-    const input = event.target;
-    const text = input.value;
-    input.value = '';
-    if (!text) {
-      // Just press Enter
-      fetch(API + '/api/browser/action', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ action: 'key', key: 'Enter' }),
-      }).then(() => _rbRefresh());
-      return;
-    }
-    // Type text then press Enter
-    fetch(API + '/api/browser/action', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ action: 'type', text }),
-    }).then(() => _rbRefresh());
-  } else if (event.key === 'Escape') {
-    fetch(API + '/api/browser/action', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ action: 'key', key: 'Escape' }),
-    }).then(() => _rbRefresh());
-  } else if (event.key === 'Tab') {
-    event.preventDefault();
-    fetch(API + '/api/browser/action', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ action: 'key', key: 'Tab' }),
-    }).then(() => _rbRefresh());
-  } else if (event.key === 'Backspace' && !event.target.value) {
-    // If input is empty, forward backspace to remote browser
-    fetch(API + '/api/browser/action', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ action: 'key', key: 'Backspace' }),
-    }).then(() => _rbRefresh());
-  }
 }
 
 // ═══════ FILE EXPLORER ═══════
@@ -15088,7 +13790,6 @@ function switchView(view) {
   document.getElementById('board-view').style.display = view === 'board' ? '' : 'none';
   document.getElementById('scheduler-view').style.display = view === 'scheduler' ? '' : 'none';
   document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
-  document.getElementById('browser-view').style.display = view === 'browser' ? 'flex' : 'none';
   document.getElementById('logs-view').style.display = view === 'logs' ? 'flex' : 'none';
   document.getElementById('email-view').style.display = view === 'email' ? 'flex' : 'none';
   document.getElementById('notes-view').style.display = view === 'notes' ? 'flex' : 'none';
@@ -15099,7 +13800,6 @@ function switchView(view) {
   document.getElementById('tab-board').classList.toggle('active', view === 'board');
   document.getElementById('tab-scheduler').classList.toggle('active', view === 'scheduler');
   document.getElementById('tab-files').classList.toggle('active', view === 'files');
-  document.getElementById('tab-browser').classList.toggle('active', view === 'browser');
   document.getElementById('tab-logs').classList.toggle('active', view === 'logs');
   document.getElementById('tab-email').classList.toggle('active', view === 'email');
   document.getElementById('tab-notes').classList.toggle('active', view === 'notes');
@@ -15118,7 +13818,6 @@ function switchView(view) {
       setTimeout(() => openPeek(_sess), 50);
     }
   }
-  if (view === 'browser') _rbLoadProfiles();
   if (view === 'email') _emailLoad();
   if (view === 'notes') {
     _notesInitQuill(); _notesApplySidebarState();
@@ -17344,7 +16043,7 @@ function enterGridMode() {
   }
   view.classList.add('active');
   // Mark Grid tab as active, deactivate others
-  ['sessions','board','scheduler','files','logs','browser','email','notes','crm'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
+  ['sessions','board','scheduler','files','logs','email','notes','crm'].forEach(t => document.getElementById('tab-' + t)?.classList.remove('active'));
   document.getElementById('tab-grid').classList.add('active');
   _renderGridChips();
   _wsRenderProfileBar();
@@ -21561,234 +20260,6 @@ class CCHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._json({"ok": False, "output": str(e)}, 500)
 
-        # ── Remote browser endpoints ──
-        if method == "POST" and path == "/api/browser/start":
-            global _rb_profile
-            body = self._read_body()
-            profile = body.get("profile", "").strip()
-            cmd = {"action": "start", "url": body.get("url", "")}
-            if body.get("headed"):
-                cmd["headed"] = True
-            if body.get("record"):
-                cmd["record"] = True
-            if profile and profile != "default":
-                cmd["profile"] = profile
-                _rb_profile = profile
-            else:
-                _rb_profile = "default"
-            result = _rb_send(cmd)
-            if result.get("ok"):
-                result["profile"] = _rb_profile
-            return self._json(result, 200 if result.get("ok") else 500)
-
-        if method == "POST" and path == "/api/browser/stop":
-            global _rb_last_video
-            result = _rb_send({"action": "stop"})
-            _rb_last_video = None
-            webm = result.get("videoPath")
-            captions = result.get("captions") or []
-            if webm and os.path.exists(webm):
-                _rb_process_video(webm, captions or None, profile=_rb_profile)
-            return self._json({"ok": True, "videoReady": bool(_rb_last_video)})
-
-        # POST /api/browser/agent — start AI agent task
-        if method == "POST" and path == "/api/browser/agent":
-            with _rb_agent_lock:
-                if _rb_agent_state["running"]:
-                    return self._json({"error": "agent already running"}, 409)
-            body = self._read_body()
-            task = body.get("task", "").strip()
-            if not task:
-                return self._json({"error": "task required"}, 400)
-            _rb_agent_update(
-                running=True, task=task, step=0, total_steps=0,
-                action="Initializing…", done=False, error=None, video_ready=False,
-                _profile=body.get("profile", _rb_profile),
-            )
-            threading.Thread(
-                target=_run_browser_agent,
-                args=(task, body.get("url", ""), int(body.get("max_steps", 25))),
-                daemon=True,
-            ).start()
-            return self._json({"ok": True})
-
-        # GET /api/browser/agent/status — poll agent progress
-        if method == "GET" and path == "/api/browser/agent/status":
-            with _rb_agent_lock:
-                return self._json(dict(_rb_agent_state))
-
-        # POST /api/browser/agent/stop — cancel running agent
-        if method == "POST" and path == "/api/browser/agent/stop":
-            _rb_agent_update(running=False)
-            return self._json({"ok": True})
-
-        # GET /api/browser/video — download latest recorded video
-        if method == "GET" and path == "/api/browser/video":
-            if not _rb_last_video or not os.path.exists(_rb_last_video):
-                return self._json({"error": "no video"}, 404)
-            ext = Path(_rb_last_video).suffix.lower()
-            mime = "video/mp4" if ext == ".mp4" else "video/webm"
-            data = open(_rb_last_video, "rb").read()
-            fname = Path(_rb_last_video).name
-            self.send_response(200)
-            self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(data)
-            return
-
-        # GET /api/browser/profiles — list available profiles
-        if method == "GET" and path == "/api/browser/profiles":
-            default_path = CC_HOME / "playwright-auth" / "profile"
-            profiles = [{"name": "default", "path": str(default_path),
-                         "has_state": _profile_has_state(default_path)}]
-            if _RB_PROFILES_DIR.exists():
-                for d in sorted(_RB_PROFILES_DIR.iterdir()):
-                    if d.is_dir() and not d.name.startswith("."):
-                        profiles.append({"name": d.name, "path": str(d),
-                                         "has_state": _profile_has_state(d)})
-            return self._json({"profiles": profiles, "active": _rb_profile})
-
-        # POST /api/browser/profiles — create a new profile
-        if method == "POST" and path == "/api/browser/profiles":
-            body = self._read_body()
-            name = re.sub(r'[^a-zA-Z0-9_-]', '-', body.get("name", "").strip())
-            if not name or name == "default":
-                return self._json({"error": "invalid profile name"}, 400)
-            profile_dir = _RB_PROFILES_DIR / name
-            profile_dir.mkdir(parents=True, exist_ok=True)
-            return self._json({"ok": True, "name": name}, 201)
-
-        # DELETE /api/browser/profiles/<name>
-        del_profile_m = re.match(r"^/api/browser/profiles/([a-zA-Z0-9_-]+)$", path)
-        if method == "DELETE" and del_profile_m:
-            name = del_profile_m.group(1)
-            if name == "default":
-                return self._json({"error": "cannot delete default profile"}, 400)
-            profile_dir = _RB_PROFILES_DIR / name
-            if profile_dir.exists():
-                import shutil
-                shutil.rmtree(str(profile_dir), ignore_errors=True)
-            return self._json({"ok": True})
-
-        # GET /api/browser/profiles/<name>/export — download profile as zip
-        export_m = re.match(r"^/api/browser/profiles/([a-zA-Z0-9_-]+)/export$", path)
-        if method == "GET" and export_m:
-            import shutil, tempfile, zipfile
-            name = export_m.group(1)
-            if name == "default":
-                profile_dir = CC_HOME / "playwright-auth" / "profile"
-            else:
-                profile_dir = _RB_PROFILES_DIR / name
-            if not profile_dir.exists():
-                return self._json({"error": "profile not found"}, 404)
-            # Zip only the key state files (cookies, storage, etc.) — skip cache/gpu dirs
-            keep_dirs = {"Default"}
-            skip_names = {"Cache", "Code Cache", "GPUCache", "ShaderCache",
-                          "GrShaderCache", "GraphiteDawnCache", "BrowserMetrics-spare.pma",
-                          "Crashpad", "CrashpadMetrics-active.pma"}
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
-                tmp_zip = tf.name
-            with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                for item in profile_dir.rglob("*"):
-                    if item.is_file():
-                        parts = item.relative_to(profile_dir).parts
-                        if parts and parts[0] in skip_names: continue
-                        if len(parts) > 1 and parts[1] in skip_names: continue
-                        zf.write(item, item.relative_to(profile_dir))
-            data = open(tmp_zip, "rb").read()
-            os.unlink(tmp_zip)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/zip")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Content-Disposition", f'attachment; filename="{name}-profile.zip"')
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(data)
-            return
-
-        # POST /api/browser/profiles/<name>/import — restore profile from zip upload
-        import_m = re.match(r"^/api/browser/profiles/([a-zA-Z0-9_-]+)/import$", path)
-        if method == "POST" and import_m:
-            import shutil, tempfile, zipfile
-            name = import_m.group(1)
-            if name == "default":
-                profile_dir = CC_HOME / "playwright-auth" / "profile"
-            else:
-                profile_dir = _RB_PROFILES_DIR / name
-            profile_dir.mkdir(parents=True, exist_ok=True)
-            raw = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tf:
-                tf.write(raw)
-                tmp_zip = tf.name
-            try:
-                with zipfile.ZipFile(tmp_zip) as zf:
-                    zf.extractall(str(profile_dir))
-            except Exception as e:
-                return self._json({"error": f"bad zip: {e}"}, 400)
-            finally:
-                os.unlink(tmp_zip)
-            return self._json({"ok": True, "name": name})
-
-        if method == "POST" and path == "/api/browser/navigate":
-            body = self._read_body()
-            result = _rb_send({"action": "navigate", "url": body.get("url", "")})
-            return self._json(result, 200 if result.get("ok") else 500)
-
-        if method == "POST" and path == "/api/browser/action":
-            body = self._read_body()
-            result = _rb_send(body)
-            return self._json(result, 200 if result.get("ok") else 500)
-
-        if method == "GET" and path == "/api/browser/screenshot":
-            result = _rb_send({"action": "screenshot"})
-            if not result.get("ok") or "data" not in result:
-                return self._json({"error": result.get("error", "no screenshot")}, 500)
-            img_data = base64.b64decode(result["data"])
-            # Always save to a well-known path so agents can Read it safely
-            _ss_dir = Path.home() / ".amux" / "browser-screenshots"
-            _ss_dir.mkdir(parents=True, exist_ok=True)
-            _ss_path = _ss_dir / "latest.jpg"
-            _ss_path.write_bytes(img_data)
-            # Default: return JSON with path (safe for agents). Only return raw bytes if ?raw=1
-            _qs = self.path.split("?", 1)[1] if "?" in self.path else ""
-            _want_raw = "raw=1" in _qs
-            if not _want_raw:
-                return self._json({"ok": True, "path": str(_ss_path), "size": len(img_data),
-                                   "url": result.get("url",""), "title": result.get("title","")})
-            self.send_response(200)
-            self.send_header("Content-Type", "image/jpeg")
-            self.send_header("Content-Length", str(len(img_data)))
-            self.send_header("Cache-Control", "no-store")
-            if result.get("url"):
-                self.send_header("X-Page-Url", result["url"])
-            if result.get("title"):
-                from urllib.parse import quote
-                self.send_header("X-Page-Title", quote(result["title"]))
-            if result.get("tabs") is not None:
-                import json as _json
-                self.send_header("X-Tabs", _json.dumps(result["tabs"]))
-                self.send_header("X-Active-Tab", str(result.get("activeTab", 0)))
-            self.end_headers()
-            self.wfile.write(img_data)
-            return
-
-        # GET /api/browser/screenshots/latest — serve saved screenshot file (always a valid JPEG)
-        if method == "GET" and path == "/api/browser/screenshots/latest":
-            _ss_path = Path.home() / ".amux" / "browser-screenshots" / "latest.jpg"
-            if not _ss_path.exists():
-                return self._json({"error": "no screenshot taken yet"}, 404)
-            img_data = _ss_path.read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "image/jpeg")
-            self.send_header("Content-Length", str(len(img_data)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(img_data)
-            return
-
         # GET /api/metrics — system + per-session resource metrics
         if method == "GET" and path == "/api/metrics":
             return self._json(get_system_metrics())
@@ -21817,10 +20288,11 @@ class CCHandler(BaseHTTPRequestHandler):
         # GET /api/recordings — list all recordings in ~/.amux/recordings/
         if method == "GET" and path == "/api/recordings":
             import json as _json
+            recordings_dir = CC_HOME / "recordings"
             recs = []
-            if _RB_RECORDINGS_DIR.exists():
+            if recordings_dir.exists():
                 video_exts = {".mp4", ".webm", ".mov"}
-                for f in sorted(_RB_RECORDINGS_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+                for f in sorted(recordings_dir.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
                     if f.suffix.lower() in video_exts and f.is_file():
                         srt = f.with_suffix(".srt")
                         meta_file = f.with_suffix(".json")
@@ -21835,7 +20307,7 @@ class CCHandler(BaseHTTPRequestHandler):
                             "srt": str(srt) if srt.exists() else None,
                             "profile": meta.get("profile"), "task": meta.get("task"),
                         })
-            return self._json({"recordings": recs, "dir": str(_RB_RECORDINGS_DIR)})
+            return self._json({"recordings": recs, "dir": str(recordings_dir)})
 
         # GET /api/file/vtt?path=... — convert SRT → WebVTT for <track> elements
         if method == "GET" and path == "/api/file/vtt":
@@ -22863,7 +21335,7 @@ class CCHandler(BaseHTTPRequestHandler):
                 cfg["CC_CREATOR"] = creator
             cfg["CC_FLAGS"] = ""
             mcp = body.get("mcp", "").strip().lower()
-            if mcp and mcp in ("chrome", "playwright", "both"):
+            if mcp and mcp == "chrome":
                 cfg["CC_MCP"] = mcp
             _write_env(env_file, cfg)
             _save_meta(name, {
@@ -23955,11 +22427,11 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                     _write_env(env_file, cfg)
                     return self._json({"ok": True, "message": "tags updated"})
 
-                # Set MCP browser config (chrome, playwright, both, or empty to disable)
+                # Set MCP browser config (chrome or empty to disable)
                 if "mcp" in body:
                     mcp_val = body["mcp"].strip().lower()
-                    if mcp_val and mcp_val not in ("chrome", "playwright", "both"):
-                        return self._json({"error": "mcp must be 'chrome', 'playwright', 'both', or '' (empty)"}, 400)
+                    if mcp_val and mcp_val not in ("chrome",):
+                        return self._json({"error": "mcp must be 'chrome' or '' (empty)"}, 400)
                     cfg["CC_MCP"] = mcp_val
                     _write_env(env_file, cfg)
                     msg = f"mcp set to {mcp_val}" if mcp_val else "mcp disabled"
@@ -24076,7 +22548,12 @@ def _sync_skills_from_github(_ur, repo, branch):
 # ═══════════════════════════════════════════
 
 def _watch_self(server):
-    """Watch amux-server.py for changes and restart on modification."""
+    """Watch amux-server.py for changes and restart on modification.
+
+    Uses a 3-second debounce so rapid successive edits (e.g. multiple
+    sessions committing) only trigger a single restart.
+    """
+    _DEBOUNCE = 3  # seconds to wait for edits to settle
     script = Path(__file__).resolve()
     mtime = script.stat().st_mtime
     while True:
@@ -24084,9 +22561,26 @@ def _watch_self(server):
         try:
             new_mtime = script.stat().st_mtime
             if new_mtime != mtime:
+                # Debounce: wait for file to stop changing
+                slog(f"[restart] {script.name} changed — debouncing {_DEBOUNCE}s...")
+                while True:
+                    time.sleep(_DEBOUNCE)
+                    settled_mtime = script.stat().st_mtime
+                    if settled_mtime == new_mtime:
+                        break
+                    slog(f"[restart] file changed again during debounce, resetting...")
+                    new_mtime = settled_mtime
                 uptime = int(time.time() - _server_start_time)
-                slog(f"[restart] {script.name} changed — restarting (uptime={uptime}s, requests={_server_request_count}, threads={threading.active_count()})")
+                slog(f"[restart] {script.name} settled — restarting (uptime={uptime}s, requests={_server_request_count}, threads={threading.active_count()})")
                 print(f"\n\033[33m↻ {script.name} changed — restarting...\033[0m")
+                # Verify syntax before restarting — don't restart into a broken file
+                try:
+                    import ast as _ast
+                    _ast.parse(script.read_text())
+                except SyntaxError as se:
+                    slog(f"[restart] ABORTED — syntax error: {se}")
+                    mtime = new_mtime  # update mtime so we re-check on next change
+                    continue
                 # Shutdown with timeout — don't let stuck threads block restart
                 t = threading.Thread(target=server.shutdown, daemon=True)
                 t.start()
