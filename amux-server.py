@@ -11677,28 +11677,28 @@ async function peekShowTranscripts() {
       const kb = (t.size / 1024).toFixed(1);
       const dt = new Date(t.mtime * 1000).toLocaleString();
       const url = base + '/transcripts/' + encodeURIComponent(t.name);
-      return \`<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border-subtle,rgba(128,128,128,.15))">
-        <span style="flex:1;font-size:0.72rem;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="\${esc(t.name)}">\${esc(t.name)}</span>
-        <span style="font-size:0.7rem;color:var(--dim);flex-shrink:0">\${kb} KB</span>
-        <span style="font-size:0.68rem;color:var(--dim);flex-shrink:0">\${dt}</span>
-        <a href="\${url}" download="\${esc(t.name)}" style="font-size:0.72rem;color:var(--accent);text-decoration:none;flex-shrink:0">&#11015;</a>
-      </div>\`;
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border-subtle,rgba(128,128,128,.15))">
+        <span style="flex:1;font-size:0.72rem;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(t.name)}">${esc(t.name)}</span>
+        <span style="font-size:0.7rem;color:var(--dim);flex-shrink:0">${kb} KB</span>
+        <span style="font-size:0.68rem;color:var(--dim);flex-shrink:0">${dt}</span>
+        <a href="${url}" download="${esc(t.name)}" style="font-size:0.72rem;color:var(--accent);text-decoration:none;flex-shrink:0">&#11015;</a>
+      </div>`;
     }).join('');
   }
   _modalResolve = null;
-  document.getElementById('modal-msg').innerHTML = \`<div style="text-align:left;min-width:320px;max-width:500px">
-    <div style="font-size:1rem;font-weight:700;margin-bottom:4px">Transcripts — \${esc(sess)}</div>
+  document.getElementById('modal-msg').innerHTML = `<div style="text-align:left;min-width:320px;max-width:500px">
+    <div style="font-size:1rem;font-weight:700;margin-bottom:4px">Transcripts — ${esc(sess)}</div>
     <p style="font-size:0.75rem;color:var(--dim);margin:0 0 12px">JSONL conversation backups (auto-saved before compaction).</p>
-    <div style="max-height:260px;overflow-y:auto">\${bodyHtml}</div>
-  </div>\`;
-  document.getElementById('modal-btns').innerHTML = \`
+    <div style="max-height:260px;overflow-y:auto">${bodyHtml}</div>
+  </div>`;
+  document.getElementById('modal-btns').innerHTML = `
     <button class="btn" onclick="(async()=>{
-      const br=await fetch(API+'/api/sessions/'+encodeURIComponent('\${esc(sess)}')+'/transcripts',{method:'POST'});
+      const br=await fetch(API+'/api/sessions/'+encodeURIComponent('${esc(sess)}')+'/transcripts',{method:'POST'});
       const bd=await br.json();
       _modalClose(false);
       setTimeout(()=>peekShowTranscripts(),100);
     })()">&#128190; Backup Now</button>
-    <button class="btn primary" onclick="_modalClose(false)">Close</button>\`;
+    <button class="btn primary" onclick="_modalClose(false)">Close</button>`;
   document.getElementById('modal-backdrop').classList.add('open');
 }
 
