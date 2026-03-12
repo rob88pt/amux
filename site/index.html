@@ -150,13 +150,6 @@ body { overflow-x: hidden; }
   padding: 7rem 2rem 4rem;
   max-width: 720px; margin: 0 auto;
 }
-.hero h1 {
-  font-size: clamp(2.2rem, 5vw, 3.4rem);
-  font-weight: 700; line-height: 1.1;
-  letter-spacing: -0.03em;
-  margin-bottom: 1.5rem;
-  font-family: var(--sans);
-}
 .hero-sub {
   font-size: 1rem; color: var(--dim);
   max-width: 520px; line-height: 1.7;
@@ -201,6 +194,30 @@ body { overflow-x: hidden; }
   border: none;
   overflow: hidden;
 }
+
+/* ── HERO TERMINAL HEADLINE ── */
+.hero-terminal-headline {
+  display: flex; align-items: flex-start; gap: 0.6em;
+  margin-bottom: 1.5rem; text-align: left;
+}
+.hth-prompt {
+  font-family: var(--mono); font-size: clamp(2rem, 4.5vw, 3.2rem);
+  color: var(--green); font-weight: 700; line-height: 1.1;
+  flex-shrink: 0; padding-top: 0.04em; user-select: none;
+}
+.hero-terminal-headline h1 {
+  font-family: var(--mono); font-size: clamp(2rem, 4.5vw, 3.2rem);
+  font-weight: 700; line-height: 1.2; letter-spacing: -0.02em;
+  margin-bottom: 0; display: flex; flex-direction: column;
+}
+.hth-line1 { color: var(--text); }
+.hth-line2 { color: var(--text); display: flex; align-items: center; }
+.hth-cursor {
+  display: inline-block; width: 0.55em; height: 1.1em;
+  background: var(--green); margin-left: 0.15em;
+  animation: blink 1.1s step-end infinite; vertical-align: text-bottom;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
 
 /* ── TERMINAL ── */
 .terminal-section {
@@ -654,7 +671,9 @@ body { overflow-x: hidden; }
 <!-- HERO -->
 <div class="hero">
   <div class="hero-eyebrow">Open source &middot; Python 3 + tmux &middot; MIT license</div>
-  <h1>Run dozens of Claude Code<br>agents while you sleep</h1>
+  <div class="hero-terminal-headline">
+    <span class="hth-prompt">$</span><h1><span class="hth-line1">Run dozens of Claude Code</span><span class="hth-line2">agents while you sleep<span class="hth-cursor"></span></span></h1>
+  </div>
   <p class="hero-sub">Self-healing, parallel AI coding sessions with a web dashboard, mobile app, and agent-to-agent orchestration. Zero external dependencies.</p>
   <div class="hero-ctas">
     <a class="primary" href="https://github.com/mixpeek/amux#install">get started free</a>
