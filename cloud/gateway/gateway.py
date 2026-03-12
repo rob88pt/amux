@@ -237,8 +237,7 @@ def _write_compose(user_id, port):
         .replace("${CF_ACCOUNT_ID}", CF_ACCOUNT_ID)
         .replace("${R2_ENDPOINT}", R2_ENDPOINT)
         .replace("${R2_ACCESS_KEY}", R2_ACCESS_KEY)
-        .replace("${R2_SECRET_KEY}", R2_SECRET_KEY)
-        .replace("${ANTHROPIC_API_KEY}", ANTHROPIC_API_KEY))
+        .replace("${R2_SECRET_KEY}", R2_SECRET_KEY))
     d = _compose_dir(user_id)
     open(os.path.join(d, "docker-compose.yml"), "w").write(compose)
     open(os.path.join(d, "litestream.yml"), "w").write(

@@ -3260,11 +3260,20 @@ def _git_info(work_dir: str, detail: bool = False) -> dict:
 def _init_default_sessions():
     """Create built-in default sessions for new installs (idempotent — skips if already exists)."""
     CC_SESSIONS.mkdir(parents=True, exist_ok=True)
+    # Cloud: create "hello-world" session in /root/dev on first run
+    hello_env = CC_SESSIONS / "hello-world.env"
+    is_cloud = bool(os.environ.get("AMUX_PORT"))  # Docker containers set this
+    if is_cloud and not hello_env.exists():
+        dev_dir = Path("/root/dev")
+        dev_dir.mkdir(parents=True, exist_ok=True)
+        _write_env(hello_env, {
+            "CC_DIR": str(dev_dir),
+            "CC_DESC": "Welcome to amux! Start here.",
+        })
+    # Local: create amux-helper session if in a git checkout
     helper_env = CC_SESSIONS / "amux-helper.env"
     if not helper_env.exists():
-        # Use the directory containing amux-server.py as the repo root.
         repo_dir = Path(__file__).parent.resolve()
-        # Only create the session if this looks like a real checkout (has .git).
         if (repo_dir / ".git").exists():
             _write_env(helper_env, {"CC_DIR": str(repo_dir)})
 
@@ -7176,21 +7185,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div id="no-apikey-banner" style="display:none;background:#7c2d12;color:#fed7aa;padding:8px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;">
   No Anthropic API key set — Claude sessions won't work. <a href="#" onclick="event.preventDefault();document.getElementById('no-apikey-banner').style.display='none';toggleSettings()" style="color:#fde68a;font-weight:600;text-decoration:underline;">Add key in Settings</a>
 </div>
-<!-- Blocking API key setup modal — shown on cloud when no user key is configured -->
+<!-- API key setup modal — shown on cloud when no user key is configured (dismissible) -->
 <div id="apikey-setup-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;display:none;align-items:center;justify-content:center;">
-  <div style="background:var(--surface,#1a1a2e);border:1px solid var(--border,#333);border-radius:12px;padding:32px;max-width:440px;width:90%;box-shadow:0 24px 64px rgba(0,0,0,0.6);">
+  <div style="background:var(--surface,#1a1a2e);border:1px solid var(--border,#333);border-radius:12px;padding:32px;max-width:440px;width:90%;box-shadow:0 24px 64px rgba(0,0,0,0.6);position:relative;">
+    <button onclick="document.getElementById('apikey-setup-modal').style.display='none'" style="position:absolute;top:12px;right:14px;background:none;border:none;color:var(--dim,#888);font-size:1.2rem;cursor:pointer;padding:4px;" title="Close">&#x2715;</button>
     <div style="font-size:1.4rem;font-weight:700;margin-bottom:8px;color:var(--text,#e8e8e8);">Set your API key</div>
     <div style="font-size:0.85rem;color:var(--dim,#888);margin-bottom:24px;line-height:1.5;">
       Enter your Anthropic API key to start using Claude sessions. Your key is stored privately in your container — amux never has access to it.<br><br>
-      <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:var(--accent,#7c6fcd);">Get a key at console.anthropic.com →</a>
+      <a href="https://console.anthropic.com/settings/keys" target="_blank" style="color:var(--accent,#7c6fcd);">Get a key at console.anthropic.com &rarr;</a>
     </div>
     <input id="apikey-setup-input" type="password" placeholder="sk-ant-api03-..." autocomplete="off" spellcheck="false"
-      style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:7px;border:1px solid var(--border,#333);background:var(--bg,#111);color:var(--text,#e8e8e8);font-size:0.92rem;font-family:monospace;margin-bottom:8px;">
+      style="width:100%;box-sizing:border-box;padding:10px 12px;border-radius:7px;border:1px solid var(--border,#333);background:var(--bg,#111);color:var(--text,#e8e8e8);font-size:0.92rem;font-family:monospace;margin-bottom:8px;"
+      onkeydown="if(event.key==='Enter')apikeySetupSave()">
     <div id="apikey-setup-err" style="color:#f87171;font-size:0.8rem;min-height:18px;margin-bottom:12px;"></div>
     <button id="apikey-setup-btn" onclick="apikeySetupSave()"
       style="width:100%;padding:11px;border-radius:7px;border:none;background:var(--accent,#7c6fcd);color:#fff;font-size:0.95rem;font-weight:600;cursor:pointer;">
       Save &amp; continue
     </button>
+    <div style="text-align:center;margin-top:10px;font-size:0.78rem;color:var(--dim,#666);">You can add this later in Settings</div>
   </div>
 </div>
 <div id="org-banner" style="display:none;background:#1e1b4b;border-bottom:1px solid #4338ca;color:#c7d2fe;padding:7px 16px;text-align:center;font-size:0.82rem;z-index:200;position:relative;display:none;">
@@ -9845,7 +9857,9 @@ let hiddenTabs = (function() {
     const s = localStorage.getItem('amux_hidden_tabs');
     if (s !== null) return new Set(JSON.parse(s));
   } catch(e) {}
-  // Default for new installs: show only sessions, board, files, notes, workspace, crm
+  // Cloud default: sessions, files, notes, metrics. Local default: sessions, board, files, notes, workspace, crm.
+  const isCloud = location.hostname !== 'localhost' && !location.hostname.startsWith('127.');
+  if (isCloud) return new Set(['board','calendar','scheduler','reports','notifications','logs','browser','email','workspace','crm']);
   return new Set(['calendar','scheduler','reports','notifications','logs','browser','email','metrics']);
 })();
 
@@ -22028,10 +22042,18 @@ end tell
         # ── Identity (cloud user info forwarded by gateway) ──────────────────
         if path == "/api/identity" and method == "GET":
             email = self.headers.get("X-Amux-User-Email", "")
-            # has_api_key: True if ANTHROPIC_API_KEY is available from any source
-            # (server.env file OR process environment e.g. Docker-injected)
-            has_key = bool(os.environ.get("ANTHROPIC_API_KEY", "").strip())
-            return self._json({"email": email, "is_cloud": bool(email), "has_api_key": has_key})
+            # has_api_key: True only if a valid-looking key exists in server.env.
+            # We do NOT count Docker-injected env vars — those should not exist for cloud.
+            has_key_in_env = False
+            if _server_env_file.exists():
+                for _l in _server_env_file.read_text().splitlines():
+                    _l = _l.strip()
+                    if _l.startswith("ANTHROPIC_API_KEY="):
+                        _val = _l[len("ANTHROPIC_API_KEY="):].strip()
+                        if _val.startswith("sk-ant-"):
+                            has_key_in_env = True
+                        break
+            return self._json({"email": email, "is_cloud": bool(email), "has_api_key": has_key_in_env})
 
         # ── Settings env (ANTHROPIC_API_KEY etc.) ─────────────────────────────
         if path == "/api/settings/env":
