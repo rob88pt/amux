@@ -10664,8 +10664,14 @@ function _renderPeekGit(d) {
   }
 
   // Filter to session's tracked files if available and not showing all
+  const allFiles = files;
   if (_peekTrackedFiles && !_peekGitShowAll) {
     files = files.filter(f => _peekTrackedFiles.has(f.file));
+    // Auto-switch to All view if session filter hides everything but there are changes
+    if (files.length === 0 && allFiles.length > 0) {
+      _peekGitShowAll = true;
+      files = allFiles;
+    }
   }
 
   // LEFT: dir tree panel
@@ -10675,7 +10681,7 @@ function _renderPeekGit(d) {
   document.getElementById('peek-git-diff-file-hdr').style.display = 'none';
   document.getElementById('peek-git-diff-scroll').style.display = 'none';
   document.getElementById('peek-git-diff-empty').style.display = 'flex';
-  document.getElementById('peek-git-diff-empty').textContent = files.length ? 'Select a file to view diff' : 'No changes';
+  document.getElementById('peek-git-diff-empty').textContent = files.length ? 'Select a file to view diff' : 'Working tree clean';
 }
 
 function _buildFileTree(files) {
