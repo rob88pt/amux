@@ -7309,10 +7309,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div class="card-menu-item" onclick="event.stopPropagation();closeAddMenu();openConnect()"><span class="mi">&#x1F517;</span> Connect tmux</div>
       </div>
     </div>
-    <button class="settings-btn" id="help-btn" onclick="_wtRestart()" title="Walkthrough" style="font-size:1rem;margin-right:2px">?</button>
     <div class="settings-wrap">
       <button class="settings-btn" id="settings-btn" onclick="event.stopPropagation();toggleSettings()">&#x2699;</button>
       <div class="settings-menu" id="settings-menu">
+        <div class="settings-section" style="padding:10px 14px;">
+          <button onclick="_wtRestart();closeSettings();" style="width:100%;padding:8px 12px;border-radius:8px;border:1px solid var(--accent);background:var(--accent);color:#fff;font-size:0.82rem;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;">
+            <span style="font-size:1rem;">?</span> Walkthrough
+          </button>
+        </div>
+        <div class="settings-sep"></div>
         <div class="settings-section">
           <div class="settings-section-label" id="settings-device-label">Device</div>
           <div id="settings-device-current" style="font-size:0.88rem;font-weight:600;margin-bottom:6px;"></div>
@@ -17936,6 +17941,13 @@ async function pullFromRemote(btn) {
       pos: 'bottom'
     },
     {
+      target: '.tab-bar-outer',
+      title: 'Navigate with tabs',
+      body: 'Switch between views — Sessions, Board, Files, Workspace, Notes, and more. Tap the \u229E button on the right to show or hide tabs.',
+      pos: 'bottom',
+      padX: 0, padY: 0
+    },
+    {
       target: '.cards',
       title: 'Your agent fleet',
       body: 'Sessions appear here as live cards. Each shows status (working, needs input, idle), token usage, last activity, and the current task.',
@@ -17943,23 +17955,16 @@ async function pullFromRemote(btn) {
       padX: 20, padY: 10
     },
     {
-      target: function() { return document.querySelector('.send-row') || document.querySelector('.chips'); },
+      target: function() { var el = document.querySelector('.send-row') || document.querySelector('.chips'); return el || document.querySelector('.card-menu-btn'); },
       targetFallback: '.cards',
-      title: 'Command & control',
-      body: 'Send messages to any agent right from the card. Quick-action chips give one-tap access — continue, compact, cancel, and more.',
+      title: 'Command & peek',
+      body: 'Send messages and use quick-action chips right on the card. Tap a session name or the \u22EF menu \u2192 Peek for a full terminal view with search, git status, and memory.',
       pos: 'top'
-    },
-    {
-      target: function() { return document.querySelector('.card-menu-btn') || document.querySelector('.card-name'); },
-      targetFallback: '.cards',
-      title: 'Peek inside',
-      body: 'Tap any session name or the \u22EF menu → Peek for a full terminal view. Search output, check git status, edit memory — all without tmux.',
-      pos: 'bottom'
     },
     {
       target: '#tab-board',
       title: 'Coordinate with the board',
-      body: 'Plan work across your fleet. Create tasks, assign to sessions, and agents claim them atomically — no duplicate work.',
+      body: 'Plan work across your fleet. Create tasks, assign to sessions, and agents claim them atomically \u2014 no duplicate work.',
       pos: 'bottom'
     },
     {
