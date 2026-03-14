@@ -56,6 +56,7 @@ CC_UPLOADS = CC_HOME / "uploads"
 CC_NOTES = CC_HOME / "notes"
 CC_NOTES_PINS = CC_HOME / "notes" / ".pins.json"
 CC_MAP = CC_HOME / "map.json"
+CC_NOTIFICATIONS = CC_HOME / "notifications.json"
 CC_TRANSCRIPTS = CC_HOME / "transcripts"  # per-session JSONL backups
 CC_GMAIL = CC_HOME / "gmail-tokens"        # per-account Gmail OAuth tokens
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -7510,11 +7511,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <div class="tab-bar">
   <button id="tab-sessions" class="active" onclick="switchView('sessions')">Sessions</button>
   <button id="tab-board" onclick="switchView('board')">Board</button>
+  <button id="tab-notifications" onclick="switchView('notifications')">Notifications</button>
   <button id="tab-scheduler" onclick="switchView('scheduler')">Scheduler</button>
   <button id="tab-files" onclick="switchView('files')">Files</button>
   <button id="tab-logs" onclick="switchView('logs')">Logs</button>
   <button id="tab-grid" onclick="enterGridMode()">Workspace</button>
-  <button id="tab-email" onclick="switchView('email')">Email</button>
   <button id="tab-notes" onclick="switchView('notes')">Notes</button>
   <button id="tab-crm" onclick="switchView('crm')">People</button>
   <button id="tab-map" onclick="switchView('map')">Map</button>
@@ -7586,62 +7587,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- Email events view -->
-<div id="email-view" style="display:none;flex-direction:row;overflow:hidden;height:calc(100vh - 110px);">
-  <!-- Gmail Sidebar: accounts + labels -->
-  <div class="gmail-sidebar" id="gmail-sidebar">
-    <div class="gmail-sidebar-header">
-      <span style="font-weight:600;font-size:0.85rem;">Email</span>
-      <div style="display:flex;gap:4px;align-items:center;">
-        <button class="notes-new-btn" onclick="_gmailCompose()" title="Compose new email">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-        </button>
-        <button class="notes-toggle-btn" onclick="_gmailToggleSidebar()" title="Collapse sidebar">
-          <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg>
-        </button>
-      </div>
-    </div>
-    <div id="gmail-accounts-list" class="gmail-accounts-list"></div>
-    <div id="gmail-labels-list" class="gmail-labels-list"></div>
-    <div style="padding:8px 10px;border-top:1px solid var(--border);flex-shrink:0;">
-      <button class="btn" onclick="_gmailConnectAccount()" style="width:100%;font-size:0.75rem;padding:4px 0;">+ Connect Account</button>
-    </div>
+<div id="notifications-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
+  <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <span style="font-weight:600;font-size:0.85rem;flex:1;">Notifications</span>
+    <button class="btn" onclick="_notifMarkAllRead()" style="font-size:0.72rem;padding:2px 8px;">Mark all read</button>
+    <button class="btn" onclick="_notifClearRead()" style="font-size:0.72rem;padding:2px 8px;">Clear read</button>
+    <button class="notes-new-btn" onclick="_notificationsLoad()" title="Refresh">
+      <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+    </button>
   </div>
-  <!-- Email list pane -->
-  <div class="gmail-list-pane" id="gmail-list-pane">
-    <div class="gmail-list-toolbar">
-      <button class="notes-expand-btn" id="gmail-expand-btn" onclick="_gmailToggleSidebar()" title="Show sidebar" style="display:none;">
-        <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg>
-      </button>
-      <input id="gmail-search" type="search" placeholder="Search email&#x2026;" class="gmail-search-input"
-        oninput="_gmailSearchDebounce()" autocomplete="off" autocorrect="off">
-      <button class="notes-new-btn" onclick="_gmailRefreshInbox()" title="Refresh">
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-      </button>
-    </div>
-    <div id="gmail-messages-list" class="gmail-messages-list"></div>
-    <div id="gmail-load-more" style="text-align:center;padding:8px;display:none;">
-      <button class="btn" onclick="_gmailLoadMore()" style="font-size:0.75rem;">Load more</button>
-    </div>
-  </div>
-  <!-- Email detail pane -->
-  <div class="gmail-detail-pane" id="gmail-detail-pane">
-    <div class="gmail-detail-empty" id="gmail-detail-empty">
-      <div style="font-size:2rem;margin-bottom:8px;">&#9993;</div>
-      <div style="color:var(--dim);font-size:0.85rem;">Select an email to read it</div>
-    </div>
-    <div id="gmail-thread-view" style="display:none;flex-direction:column;height:100%;">
-      <div class="gmail-thread-subject" id="gmail-thread-subject"></div>
-      <div id="gmail-thread-messages" class="gmail-thread-messages"></div>
-      <div class="gmail-reply-box" id="gmail-reply-box" style="display:none;">
-        <div style="font-size:0.75rem;color:var(--dim);margin-bottom:4px;" id="gmail-reply-label">Reply</div>
-        <textarea id="gmail-reply-body" class="gmail-reply-textarea" placeholder="Write your reply&#x2026;" rows="4"></textarea>
-        <div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px;">
-          <button class="btn" onclick="_gmailCancelReply()">Cancel</button>
-          <button class="btn primary" onclick="_gmailSendReply()">Send</button>
-        </div>
-      </div>
-    </div>
-  </div>
+  <div id="notif-list" style="flex:1;overflow-y:auto;padding:8px 12px;"></div>
 </div>
 <div id="files-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
   <!-- Toolbar -->
@@ -8012,6 +7967,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div style="display:flex;align-items:center;gap:8px;padding:0 0 4px 0;flex-wrap:wrap;">
     <input id="torrent-magnet" type="text" placeholder="Paste magnet link or torrent URL…" style="flex:1;min-width:200px;font-size:0.85rem;padding:8px 12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:inherit;" autocomplete="off">
     <button onclick="_torrentAdd()" style="padding:8px 16px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-size:0.85rem;cursor:pointer;white-space:nowrap;">Add torrent</button>
+    <button onclick="_torrentBrowseDir()" style="padding:8px 12px;background:var(--surface);color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;cursor:pointer;" title="Browse download folder">&#x1F4C2;</button>
     <button onclick="_torrentShowSettings()" style="padding:8px 12px;background:var(--surface);color:var(--dim);border:1px solid var(--border);border-radius:6px;font-size:0.85rem;cursor:pointer;" title="Settings">&#x2699;</button>
   </div>
   <div id="torrent-settings" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;">
@@ -8026,11 +7982,32 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 </div>
 
 <!-- Video player overlay -->
-<div id="video-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;display:none;align-items:center;justify-content:center;flex-direction:column;" onclick="if(event.target===this)_closeVideo()">
-  <div style="position:relative;max-width:90vw;max-height:85vh;">
-    <video id="video-player" controls playsinline x-webkit-airplay="allow" airplay="allow" style="max-width:90vw;max-height:80vh;border-radius:8px;background:#000;"></video>
-    <div style="display:flex;gap:8px;margin-top:8px;justify-content:center;">
-      <button onclick="_closeVideo()" style="padding:6px 16px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:0.8rem;cursor:pointer;">Close</button>
+<div id="video-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:9999;flex-direction:column;align-items:center;justify-content:center;" onclick="if(event.target===this)_closeVideo()">
+  <div id="vp-container" style="position:relative;width:90vw;max-width:1200px;">
+    <div id="vp-title" style="color:#fff;font-size:0.85rem;margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+    <div style="position:relative;background:#000;border-radius:8px;overflow:hidden;">
+      <video id="video-player" playsinline x-webkit-airplay="allow" airplay="allow" style="width:100%;max-height:75vh;display:block;"></video>
+      <!-- Custom controls -->
+      <div id="vp-controls" style="position:absolute;bottom:0;left:0;right:0;background:linear-gradient(transparent,rgba(0,0,0,0.85));padding:12px 16px 10px;display:flex;flex-direction:column;gap:6px;opacity:1;transition:opacity 0.3s;">
+        <!-- Progress bar -->
+        <div id="vp-progress-wrap" style="position:relative;height:6px;background:rgba(255,255,255,0.15);border-radius:3px;cursor:pointer;" onclick="_vpSeek(event)" onmousemove="_vpHoverTime(event)" onmouseleave="_vpHoverHide()">
+          <div id="vp-buffer" style="position:absolute;height:100%;background:rgba(255,255,255,0.25);border-radius:3px;pointer-events:none;"></div>
+          <div id="vp-played" style="position:absolute;height:100%;background:var(--accent);border-radius:3px;pointer-events:none;"></div>
+          <div id="vp-hover-time" style="display:none;position:absolute;top:-28px;background:rgba(0,0,0,0.8);color:#fff;font-size:0.7rem;padding:2px 6px;border-radius:3px;transform:translateX(-50%);pointer-events:none;"></div>
+        </div>
+        <!-- Buttons row -->
+        <div style="display:flex;align-items:center;gap:12px;">
+          <button id="vp-play" onclick="_vpTogglePlay()" style="background:none;border:none;color:#fff;font-size:1.2rem;cursor:pointer;padding:0;width:24px;">&#x25B6;</button>
+          <span id="vp-time" style="color:rgba(255,255,255,0.7);font-size:0.75rem;font-family:'JetBrains Mono',monospace;min-width:100px;">0:00 / 0:00</span>
+          <div style="flex:1;"></div>
+          <div style="display:flex;align-items:center;gap:4px;">
+            <button id="vp-mute" onclick="_vpToggleMute()" style="background:none;border:none;color:#fff;font-size:0.9rem;cursor:pointer;padding:0;">&#x1F50A;</button>
+            <input id="vp-volume" type="range" min="0" max="1" step="0.05" value="1" oninput="_vpSetVolume(this.value)" style="width:70px;accent-color:var(--accent);cursor:pointer;">
+          </div>
+          <button onclick="_vpFullscreen()" style="background:none;border:none;color:#fff;font-size:0.9rem;cursor:pointer;padding:0;" title="Fullscreen">&#x26F6;</button>
+          <button onclick="_closeVideo()" style="background:none;border:none;color:rgba(255,255,255,0.6);font-size:1rem;cursor:pointer;padding:0;" title="Close">&#x2716;</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -10029,15 +10006,12 @@ document.addEventListener('click', e => {
 const ALL_TABS = [
   { id: 'sessions',      label: 'Sessions',   required: true },
   { id: 'board',         label: 'Board' },
-  { id: 'calendar',      label: 'Calendar' },
-  { id: 'scheduler',     label: 'Scheduler' },
-  { id: 'reports',       label: 'Reports' },
   { id: 'notifications', label: 'Notifications' },
+  { id: 'scheduler',     label: 'Scheduler' },
   { id: 'files',         label: 'Files' },
   { id: 'logs',          label: 'Logs' },
   { id: 'browser',       label: 'Browser' },
   { id: 'grid',          label: 'Workspace' },
-  { id: 'email',         label: 'Email' },
   { id: 'notes',         label: 'Notes' },
   { id: 'crm',           label: 'People' },
   { id: 'map',           label: 'Map' },
@@ -10051,7 +10025,7 @@ let hiddenTabs = (function() {
     if (s !== null) return new Set(JSON.parse(s));
   } catch(e) {}
   // Default visible tabs: sessions, files, scheduler, board, workspace, notes
-  return new Set(['calendar','reports','notifications','logs','browser','email','metrics','crm','torrents']);
+  return new Set(['logs','browser','metrics','crm','torrents']);
 })();
 
 let tabOrder = (function() {
@@ -14220,10 +14194,10 @@ function switchView(view) {
   activeView = view;
   document.getElementById('session-view').style.display = view === 'sessions' ? '' : 'none';
   document.getElementById('board-view').style.display = view === 'board' ? '' : 'none';
+  document.getElementById('notifications-view').style.display = view === 'notifications' ? 'flex' : 'none';
   document.getElementById('scheduler-view').style.display = view === 'scheduler' ? '' : 'none';
   document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
   document.getElementById('logs-view').style.display = view === 'logs' ? 'flex' : 'none';
-  document.getElementById('email-view').style.display = view === 'email' ? 'flex' : 'none';
   document.getElementById('notes-view').style.display = view === 'notes' ? 'flex' : 'none';
   document.getElementById('crm-view').style.display = view === 'crm' ? 'flex' : 'none';
   document.getElementById('map-view').style.display = view === 'map' ? 'flex' : 'none';
@@ -14231,10 +14205,10 @@ function switchView(view) {
   document.getElementById('torrents-view').style.display = view === 'torrents' ? 'flex' : 'none';
   document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
   document.getElementById('tab-board').classList.toggle('active', view === 'board');
+  document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
   document.getElementById('tab-scheduler').classList.toggle('active', view === 'scheduler');
   document.getElementById('tab-files').classList.toggle('active', view === 'files');
   document.getElementById('tab-logs').classList.toggle('active', view === 'logs');
-  document.getElementById('tab-email').classList.toggle('active', view === 'email');
   document.getElementById('tab-notes').classList.toggle('active', view === 'notes');
   document.getElementById('tab-crm').classList.toggle('active', view === 'crm');
   document.getElementById('tab-map').classList.toggle('active', view === 'map');
@@ -14253,7 +14227,7 @@ function switchView(view) {
       setTimeout(() => openPeek(_sess), 50);
     }
   }
-  if (view === 'email') _emailLoad();
+  if (view === 'notifications') _notificationsLoad();
   if (view === 'notes') {
     _notesInitQuill(); _notesApplySidebarState();
     _notesDirty = false;
@@ -14265,8 +14239,6 @@ function switchView(view) {
     fetchBoard();
     // Only poll if SSE is not active (SSE pushes board updates)
     if (_sseFallback && !boardTimer) boardTimer = setInterval(fetchBoard, 5000);
-  } else if (view === 'calendar') {
-    Promise.all([fetchBoard(), fetchSchedules()]).then(() => renderCalendar());
   } else if (view === 'scheduler') {
     Promise.all([fetchSchedules(), fetchSchedulerRuns()]).then(() => renderScheduler());
   } else {
@@ -18593,20 +18565,144 @@ function _fmtBytes(b) {
   return (b/1073741824).toFixed(2) + ' GB';
 }
 
+function _torrentBrowseDir() {
+  fetch(API + '/api/torrents/config').then(r => r.json()).then(d => {
+    if (d.download_dir) openExplore(d.download_dir);
+  });
+}
+
+// ── Video player ─────────────────────────────────────────────────────────────
+let _vpRAF = null;
+let _vpHideTimer = null;
+
 function _playVideo(gid, encodedPath) {
   const url = API + '/api/torrents/' + gid + '/file?path=' + encodedPath;
+  const fname = decodeURIComponent(encodedPath).split('/').pop();
   const v = document.getElementById('video-player');
   v.src = url;
+  document.getElementById('vp-title').textContent = fname;
   document.getElementById('video-overlay').style.display = 'flex';
   v.play().catch(() => {});
+  _vpStartLoop();
+  _vpShowControls();
 }
 
 function _closeVideo() {
   const v = document.getElementById('video-player');
   v.pause();
-  v.src = '';
+  v.removeAttribute('src');
+  v.load();
   document.getElementById('video-overlay').style.display = 'none';
+  if (_vpRAF) { cancelAnimationFrame(_vpRAF); _vpRAF = null; }
 }
+
+function _vpFmtTime(s) {
+  if (!isFinite(s)) return '0:00';
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = Math.floor(s % 60);
+  return h > 0 ? h + ':' + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0') : m + ':' + String(sec).padStart(2,'0');
+}
+
+function _vpStartLoop() {
+  function update() {
+    const v = document.getElementById('video-player');
+    if (!v || !v.src) return;
+    const dur = v.duration || 0;
+    const cur = v.currentTime || 0;
+    // Played bar
+    const pct = dur > 0 ? (cur / dur * 100) : 0;
+    document.getElementById('vp-played').style.width = pct + '%';
+    // Buffer bar
+    if (v.buffered.length > 0) {
+      const bufEnd = v.buffered.end(v.buffered.length - 1);
+      document.getElementById('vp-buffer').style.width = (bufEnd / dur * 100) + '%';
+    }
+    // Time
+    document.getElementById('vp-time').textContent = _vpFmtTime(cur) + ' / ' + _vpFmtTime(dur);
+    // Play/pause icon
+    document.getElementById('vp-play').innerHTML = v.paused ? '&#x25B6;' : '&#x23F8;';
+    _vpRAF = requestAnimationFrame(update);
+  }
+  if (_vpRAF) cancelAnimationFrame(_vpRAF);
+  _vpRAF = requestAnimationFrame(update);
+}
+
+function _vpTogglePlay() {
+  const v = document.getElementById('video-player');
+  if (v.paused) v.play().catch(() => {}); else v.pause();
+}
+
+function _vpSeek(e) {
+  const v = document.getElementById('video-player');
+  const rect = e.currentTarget.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  if (v.duration) v.currentTime = pct * v.duration;
+}
+
+function _vpHoverTime(e) {
+  const v = document.getElementById('video-player');
+  if (!v.duration) return;
+  const rect = e.currentTarget.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+  const t = pct * v.duration;
+  const el = document.getElementById('vp-hover-time');
+  el.style.display = '';
+  el.style.left = (pct * 100) + '%';
+  el.textContent = _vpFmtTime(t);
+}
+
+function _vpHoverHide() {
+  document.getElementById('vp-hover-time').style.display = 'none';
+}
+
+function _vpToggleMute() {
+  const v = document.getElementById('video-player');
+  v.muted = !v.muted;
+  document.getElementById('vp-mute').innerHTML = v.muted ? '&#x1F507;' : '&#x1F50A;';
+  document.getElementById('vp-volume').value = v.muted ? 0 : v.volume;
+}
+
+function _vpSetVolume(val) {
+  const v = document.getElementById('video-player');
+  v.volume = parseFloat(val);
+  v.muted = val == 0;
+  document.getElementById('vp-mute').innerHTML = val == 0 ? '&#x1F507;' : '&#x1F50A;';
+}
+
+function _vpFullscreen() {
+  const el = document.getElementById('video-player');
+  if (el.requestFullscreen) el.requestFullscreen();
+  else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  else if (el.webkitEnterFullscreen) el.webkitEnterFullscreen(); // iOS
+}
+
+function _vpShowControls() {
+  const ctrl = document.getElementById('vp-controls');
+  if (ctrl) ctrl.style.opacity = '1';
+  clearTimeout(_vpHideTimer);
+  _vpHideTimer = setTimeout(() => {
+    const v = document.getElementById('video-player');
+    if (v && !v.paused) ctrl.style.opacity = '0';
+  }, 3000);
+}
+
+// Click video to toggle play, mousemove to show controls
+document.getElementById('video-player').addEventListener('click', e => { e.stopPropagation(); _vpTogglePlay(); });
+document.getElementById('vp-container').addEventListener('mousemove', _vpShowControls);
+// Keyboard controls
+document.getElementById('video-overlay').addEventListener('keydown', e => {
+  const v = document.getElementById('video-player');
+  if (!v || !v.src) return;
+  if (e.key === ' ' || e.key === 'k') { e.preventDefault(); _vpTogglePlay(); }
+  if (e.key === 'ArrowLeft') { e.preventDefault(); v.currentTime = Math.max(0, v.currentTime - 10); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); v.currentTime = Math.min(v.duration || 0, v.currentTime + 10); }
+  if (e.key === 'ArrowUp') { e.preventDefault(); v.volume = Math.min(1, v.volume + 0.1); document.getElementById('vp-volume').value = v.volume; }
+  if (e.key === 'ArrowDown') { e.preventDefault(); v.volume = Math.max(0, v.volume - 0.1); document.getElementById('vp-volume').value = v.volume; }
+  if (e.key === 'f') _vpFullscreen();
+  if (e.key === 'm') _vpToggleMute();
+  if (e.key === 'Escape') _closeVideo();
+});
 
 // Enter key in magnet input
 document.getElementById('torrent-magnet').addEventListener('keydown', e => { if (e.key === 'Enter') _torrentAdd(); });
@@ -19666,6 +19762,74 @@ function _gmailFmtDate(ts) {
   const diffDays = (now - d) / 86400000;
   if (diffDays < 7) return d.toLocaleDateString([], {weekday:'short'});
   return d.toLocaleDateString([], {month:'short', day:'numeric'});
+}
+
+// ── Notifications ────────────────────────────────────────────────────────────
+var _notifData = [];
+
+async function _notificationsLoad() {
+  const el = document.getElementById('notif-list');
+  if (!el) return;
+  el.innerHTML = '<div style="color:var(--muted);padding:24px;text-align:center">Loading…</div>';
+  const r = await fetch(API + '/api/notifications').catch(() => null);
+  if (!r || !r.ok) { el.innerHTML = '<div style="color:var(--muted);padding:24px;text-align:center">Could not load notifications.</div>'; return; }
+  _notifData = await r.json();
+  _notifRender();
+}
+
+function _notifRender() {
+  const el = document.getElementById('notif-list');
+  if (!el) return;
+  if (!_notifData.length) {
+    el.innerHTML = '<div style="color:var(--muted);padding:24px;text-align:center">No notifications.</div>';
+    return;
+  }
+  const levelColor = { info: 'var(--accent,#58a6ff)', warn: '#f0ad4e', error: '#e05252', success: '#3fb950' };
+  el.innerHTML = _notifData.map(n => {
+    const col = levelColor[n.level] || levelColor.info;
+    const ts = n.ts ? new Date(n.ts * 1000).toLocaleString() : '';
+    return `<div style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--border);opacity:${n.read ? '0.5' : '1'}">
+      <div style="width:8px;height:8px;border-radius:50%;background:${col};margin-top:5px;flex-shrink:0;"></div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-weight:600;font-size:0.85rem;">${_esc(n.title || '')}</div>
+        ${n.body ? `<div style="font-size:0.8rem;color:var(--muted);margin-top:2px;">${_esc(n.body)}</div>` : ''}
+        <div style="font-size:0.72rem;color:var(--muted);margin-top:4px;">${n.source ? `<span style="margin-right:6px;opacity:0.7">${_esc(n.source)}</span>` : ''}${ts}</div>
+      </div>
+      <div style="display:flex;gap:4px;flex-shrink:0;">
+        ${!n.read ? `<button class="btn" style="font-size:0.7rem;padding:2px 6px;" onclick="_notifMarkRead('${n.id}')">✓</button>` : ''}
+        <button class="btn" style="font-size:0.7rem;padding:2px 6px;" onclick="_notifDelete('${n.id}')">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function _esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+async function _notifMarkRead(id) {
+  await fetch(API + '/api/notifications/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({read: true}) });
+  const n = _notifData.find(x => x.id === id);
+  if (n) { n.read = true; _notifRender(); }
+}
+
+async function _notifMarkAllRead() {
+  await Promise.all(_notifData.filter(n => !n.read).map(n =>
+    fetch(API + '/api/notifications/' + n.id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({read: true}) })
+  ));
+  _notifData.forEach(n => n.read = true);
+  _notifRender();
+}
+
+async function _notifDelete(id) {
+  await fetch(API + '/api/notifications/' + id, { method: 'DELETE' });
+  _notifData = _notifData.filter(n => n.id !== id);
+  _notifRender();
+}
+
+async function _notifClearRead() {
+  const readIds = _notifData.filter(n => n.read).map(n => n.id);
+  await Promise.all(readIds.map(id => fetch(API + '/api/notifications/' + id, { method: 'DELETE' })));
+  _notifData = _notifData.filter(n => !n.read);
+  _notifRender();
 }
 
 async function _emailLoad() {
@@ -20935,6 +21099,51 @@ class CCHandler(BaseHTTPRequestHandler):
                         wd = _session_work_dir(sname)
                         if wd:
                             _write_claude_memory(sname, wd)
+                return self._json({"ok": True})
+
+        # Notifications API (/api/notifications)
+        if path == "/api/notifications":
+            def _notif_load():
+                if CC_NOTIFICATIONS.exists():
+                    try: return json.loads(CC_NOTIFICATIONS.read_text())
+                    except Exception: pass
+                return []
+            def _notif_save(items):
+                CC_NOTIFICATIONS.write_text(json.dumps(items))
+            if method == "GET":
+                return self._json(_notif_load())
+            if method == "POST":
+                body = self._read_body()
+                items = _notif_load()
+                body.setdefault("id", "notif_" + str(int(time.time() * 1000)))
+                body.setdefault("ts", int(time.time()))
+                body.setdefault("read", False)
+                body.setdefault("level", "info")
+                items.insert(0, body)
+                _notif_save(items)
+                return self._json({"ok": True, "id": body["id"]})
+
+        if path.startswith("/api/notifications/"):
+            nid = path[len("/api/notifications/"):]
+            def _notif_load():
+                if CC_NOTIFICATIONS.exists():
+                    try: return json.loads(CC_NOTIFICATIONS.read_text())
+                    except Exception: pass
+                return []
+            def _notif_save(items):
+                CC_NOTIFICATIONS.write_text(json.dumps(items))
+            if method == "PATCH":
+                body = self._read_body()
+                items = _notif_load()
+                for n in items:
+                    if n.get("id") == nid:
+                        n.update(body)
+                        break
+                _notif_save(items)
+                return self._json({"ok": True})
+            if method == "DELETE":
+                items = [n for n in _notif_load() if n.get("id") != nid]
+                _notif_save(items)
                 return self._json({"ok": True})
 
         # Map API (/api/map)
