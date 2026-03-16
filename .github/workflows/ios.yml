@@ -34,6 +34,8 @@ jobs:
     needs: check
     if: needs.check.outputs.has_changes == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
+    permissions:
+      contents: write
     defaults:
       run:
         working-directory: ios
