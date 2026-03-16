@@ -153,31 +153,7 @@
   line-height: 1.7;
   margin-bottom: 1rem;
 }
-.rn-video-wrap {
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  margin-top: 0.75rem;
-}
-.rn-video-wrap video {
-  width: 100%;
-  display: block;
-}
-.rn-video-placeholder {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  padding: 2rem;
-  background: var(--surface);
-  border-radius: 8px;
-  color: var(--muted);
-  font-size: 0.85rem;
-  margin-top: 0.75rem;
-}
-.rn-video-placeholder svg {
-  opacity: 0.4;
-}
+
 @media (max-width: 640px) {
   .rn-commit { display: none; }
   .rn-entry-title { font-size: 1rem; }
@@ -210,7 +186,6 @@
   <div id="rn-list"><div class="rn-spinner">Loading&hellip;</div></div>
 </div>
 <script>
-var GH_RAW = 'https://raw.githubusercontent.com/mixpeek/amux/main/docs/release-notes/videos/';
 var GH_COMMIT = 'https://github.com/mixpeek/amux/commit/';
 
 function typeBadge(type) {
