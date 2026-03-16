@@ -2200,8 +2200,11 @@ def _cron_next_run(parts: list, base) -> str | None:
     t += _td(minutes=1)
     limit = base + _td(days=366)
     while t < limit:
+        # Cron DOW: 0=Sunday, 6=Saturday. Python weekday(): 0=Monday, 6=Sunday.
+        # Convert: (python_weekday + 1) % 7 → 0=Sun, 1=Mon, ..., 6=Sat
+        cron_dow = (t.weekday() + 1) % 7
         if (_matches(t.month, mon_s) and _matches(t.day, dom_s) and
-                _matches(t.weekday(), dow_s) and _matches(t.hour, hour_s) and
+                _matches(cron_dow, dow_s) and _matches(t.hour, hour_s) and
                 _matches(t.minute, min_s)):
             return t.strftime("%Y-%m-%dT%H:%M")
         t += _td(minutes=1)
@@ -3780,22 +3783,26 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
             # tmux send-keys -l has a ~500 char buffer limit; use load-buffer+paste-buffer for longer text
             if len(text) > 400:
                 import tempfile, os as _os
+                # Use a named buffer to avoid races between concurrent sends
+                buf_name = f"amux-{name}-{int(time.time()*1000)}"
                 with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as f:
                     f.write(text)
                     tmp = f.name
                 try:
-                    subprocess.run(["tmux", "load-buffer", tmp], check=True, capture_output=True, timeout=5)
-                    subprocess.run(["tmux", "paste-buffer", "-t", t], check=True, capture_output=True, timeout=5)
+                    subprocess.run(["tmux", "load-buffer", "-b", buf_name, tmp], check=True, capture_output=True, timeout=10)
+                    # -p flag pastes literally without interpreting newlines as Enter
+                    subprocess.run(["tmux", "paste-buffer", "-p", "-b", buf_name, "-t", t], check=True, capture_output=True, timeout=10)
+                    subprocess.run(["tmux", "delete-buffer", "-b", buf_name], capture_output=True, timeout=5)
                 finally:
                     _os.unlink(tmp)
             else:
                 # Send text literally (-l) then Enter separately
                 subprocess.run(
                     ["tmux", "send-keys", "-t", t, "-l", text],
-                    check=True, capture_output=True, timeout=5,
+                    check=True, capture_output=True, timeout=10,
                 )
             # Give readline time to process all queued characters before Enter arrives
-            time.sleep(0.1)
+            time.sleep(0.15)
             subprocess.run(
                 ["tmux", "send-keys", "-t", t, "Enter"],
                 check=True, capture_output=True, timeout=5,
@@ -3803,6 +3810,8 @@ def send_text(name: str, text: str) -> tuple[bool, str]:
             return True, "sent"
         except subprocess.CalledProcessError as e:
             return False, e.stderr.decode(errors="replace")
+        except subprocess.TimeoutExpired:
+            return False, "timeout sending text"
 
 
 def send_keys(name: str, keys: str) -> tuple[bool, str]:
@@ -16909,6 +16918,11 @@ const _cachedBoard = localStorage.getItem('amux_board_cache');
 if (_cachedBoard) {
   try { boardItems = JSON.parse(_cachedBoard); lastBoardJSON = _cachedBoard; } catch(e) {}
 }
+// Load cached notes list from localStorage
+const _cachedNotes = localStorage.getItem('amux_notes_cache');
+if (_cachedNotes) {
+  try { _notesAllNotes = JSON.parse(_cachedNotes); } catch(e) {}
+}
 if (sessions.length || drafts.length) render();
 updateConnectionStatus();
 
@@ -16955,6 +16969,10 @@ const _idb = (() => {
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => resolve(null);
     })).catch(() => null),
+    del: (key) => open().then(d => {
+      const tx = d.transaction('kv', 'readwrite');
+      tx.objectStore('kv').delete(key);
+    }).catch(() => {}),
     // Apply delta: upsert live items, remove soft-deleted ones from local mirror
     applyIssueDelta: (issues) => _txw('issues', os => {
       issues.forEach(item => { if (item.deleted) os.delete(item.id); else os.put(item); });
@@ -19110,8 +19128,24 @@ function _notesInitQuill() {
 }
 
 async function _notesLoad() {
-  const r = await fetch(API + '/api/notes');
-  const fresh = await r.json();
+  let fresh;
+  try {
+    const r = await fetch(API + '/api/notes');
+    fresh = await r.json();
+    // Cache the list
+    localStorage.setItem('amux_notes_cache', JSON.stringify(fresh));
+    _idb.set('amux_notes_cache', JSON.stringify(fresh));
+  } catch(e) {
+    // Offline — load from cache
+    const cached = localStorage.getItem('amux_notes_cache');
+    if (!cached) {
+      const idbVal = await _idb.get('amux_notes_cache').catch(() => null);
+      if (idbVal) { localStorage.setItem('amux_notes_cache', idbVal); fresh = JSON.parse(idbVal); }
+    } else {
+      fresh = JSON.parse(cached);
+    }
+    if (!fresh) { _notesShowEmpty(); return; }
+  }
   // Preserve local titles — client may be ahead of server (unsaved debounce)
   if (_notesAllNotes.length) {
     const localTitles = new Map(_notesAllNotes.map(n => [n.path, n.name]));
@@ -19350,15 +19384,21 @@ async function _notesOpen(path) {
   if (_quill) { _quill.setText(''); _quill.root.style.opacity = '0.3'; }
   document.getElementById('notes-save-status').textContent = '';
 
-  let r;
+  let data;
+  const noteCacheKey = 'amux_note_' + path;
   try {
-    r = await fetch(API + '/api/notes/' + path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/'), { signal });
+    const r = await fetch(API + '/api/notes/' + path.replace(/\.md$/, '').split('/').map(encodeURIComponent).join('/'), { signal });
+    if (!r.ok) throw new Error('not ok');
+    data = await r.json();
+    // Cache to IDB for offline access
+    _idb.set(noteCacheKey, JSON.stringify(data));
   } catch(e) {
     if (e.name === 'AbortError') return; // superseded by a newer click
-    return;
+    // Offline — try IDB cache
+    const cached = await _idb.get(noteCacheKey).catch(() => null);
+    if (cached) { data = JSON.parse(cached); }
+    else return;
   }
-  if (!r.ok) return;
-  const data = await r.json();
 
   _notesActive = { path: data.path };
   _notesRawContent = data.content || '';
@@ -19483,6 +19523,8 @@ async function _notesSave() {
   }
   statusEl.textContent = '✓ Saved';
   setTimeout(() => { statusEl.textContent = ''; }, 1500);
+  // Update IDB cache with fresh content
+  _idb.set('amux_note_' + _notesActive.path, JSON.stringify({ path: _notesActive.path, content }));
   // Update in-memory list and patch the DOM item in place (no full re-render)
   const saved = _notesAllNotes.find(n => n.path === _notesActive.path);
   if (saved) {
@@ -19521,7 +19563,9 @@ async function _notesDelete() {
   }
   const pathKey = _notesActive.path.replace(/\.md$/, '');
   if (localStorage.getItem('amux_last_note') === _notesActive.path) localStorage.removeItem('amux_last_note');
+  _idb.del('amux_note_' + _notesActive.path);
   _notesAllNotes = _notesAllNotes.filter(n => n.path !== _notesActive.path);
+  localStorage.setItem('amux_notes_cache', JSON.stringify(_notesAllNotes));
   document.querySelector(`#notes-list .notes-list-item[data-path="${_notesActive.path}"]`)?.remove();
   _notesActive = null;
   await apiCall(API + '/api/notes/' + pathKey.split('/').map(encodeURIComponent).join('/'), { method: 'DELETE' });
