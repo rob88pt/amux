@@ -33,6 +33,8 @@ IDLE_SECONDS  = int(os.environ.get("IDLE_TIMEOUT", "3600"))
 PORT_BASE     = 9000
 COOKIE_MAX_AGE = 86400 * 7  # 7 days
 SIGNUP_PASSCODE = os.environ.get("SIGNUP_PASSCODE", "")
+ADMIN_EMAILS    = set(e.strip() for e in os.environ.get("ADMIN_EMAILS", "").split(",") if e.strip())
+GATEWAY_LOG     = "/var/log/amux-gateway.log"
 
 # ── Login HTML ─────────────────────────────────────────────────────────────────
 _LOGIN_HTML = """<!DOCTYPE html>
@@ -1453,6 +1455,97 @@ class Handler(BaseHTTPRequestHandler):
                 "has_annual": bool(STRIPE_ANNUAL_PRICE_ID),
                 "org_id": target_org,
             })
+
+        # ── Admin: gateway logs ───────────────────────────────────────────────
+        if path.startswith("/api/gateway/logs") and self.command == "GET":
+            if not ADMIN_EMAILS or user_email not in ADMIN_EMAILS:
+                return self._json({"error": "forbidden"}, 403)
+
+            from urllib.parse import parse_qs
+            params = parse_qs(qs)
+            lines = int(params.get("lines", ["200"])[0])
+            search = params.get("search", [""])[0].lower()
+            source = params.get("source", ["gateway"])[0]  # gateway | container
+
+            if source == "container":
+                org_id = params.get("org_id", [""])[0] or _active_org_id()
+                try:
+                    result = subprocess.run(
+                        ["docker", "logs", "--tail", str(lines), f"amux-user-{org_id}"],
+                        capture_output=True, text=True, timeout=10)
+                    raw = (result.stdout + result.stderr).strip().split("\n")
+                except Exception as e:
+                    return self._json({"error": f"docker logs failed: {e}"}, 500)
+            else:
+                try:
+                    with open(GATEWAY_LOG, "r") as f:
+                        raw = f.readlines()
+                    raw = [l.rstrip("\n") for l in raw[-max(lines, 1):]]
+                except FileNotFoundError:
+                    raw = []
+
+            if search:
+                raw = [l for l in raw if search in l.lower()]
+
+            return self._json({"lines": raw[-lines:], "count": len(raw), "source": source})
+
+        # ── Admin: list containers ────────────────────────────────────────────
+        if path == "/api/gateway/admin/containers" and self.command == "GET":
+            if not ADMIN_EMAILS or user_email not in ADMIN_EMAILS:
+                return self._json({"error": "forbidden"}, 403)
+            try:
+                result = subprocess.run(
+                    ["docker", "ps", "--filter", "name=amux-user-", "--format",
+                     "{{.Names}}\t{{.Status}}\t{{.Ports}}"],
+                    capture_output=True, text=True, timeout=10)
+                containers = []
+                for line in result.stdout.strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    parts = line.split("\t", 2)
+                    containers.append({
+                        "name": parts[0],
+                        "status": parts[1] if len(parts) > 1 else "",
+                        "ports": parts[2] if len(parts) > 2 else "",
+                    })
+                return self._json({"containers": containers, "count": len(containers)})
+            except Exception as e:
+                return self._json({"error": str(e)}, 500)
+
+        # ── Admin: list users + orgs overview ─────────────────────────────────
+        if path == "/api/gateway/admin/users" and self.command == "GET":
+            if not ADMIN_EMAILS or user_email not in ADMIN_EMAILS:
+                return self._json({"error": "forbidden"}, 403)
+            rows = db.execute(
+                "SELECT u.id, u.email, u.plan, u.created_at, u.last_seen, "
+                "  (SELECT COUNT(*) FROM orgs WHERE owner_id=u.id) AS org_count "
+                "FROM users u ORDER BY u.last_seen DESC"
+            ).fetchall()
+            users = [{
+                "id": r["id"], "email": r["email"], "plan": r["plan"],
+                "created_at": r["created_at"], "last_seen": r["last_seen"],
+                "org_count": r["org_count"],
+            } for r in rows]
+            return self._json({"users": users, "count": len(users)})
+
+        # ── Admin: DB query (read-only) ───────────────────────────────────────
+        if path == "/api/gateway/admin/query" and self.command == "POST":
+            if not ADMIN_EMAILS or user_email not in ADMIN_EMAILS:
+                return self._json({"error": "forbidden"}, 403)
+            body = self._read_body()
+            sql = body.get("sql", "").strip()
+            if not sql:
+                return self._json({"error": "missing sql"}, 400)
+            # Block writes
+            first_word = sql.split()[0].upper() if sql.split() else ""
+            if first_word not in ("SELECT", "PRAGMA", "EXPLAIN"):
+                return self._json({"error": "read-only queries only"}, 403)
+            try:
+                rows = db.execute(sql).fetchall()
+                result = [dict(r) for r in rows]
+                return self._json({"rows": result, "count": len(result)})
+            except Exception as e:
+                return self._json({"error": str(e)}, 400)
 
         # ── Determine target container via active org ─────────────────────────
         active_org = _active_org_id()
