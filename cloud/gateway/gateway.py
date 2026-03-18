@@ -251,29 +251,90 @@ def get_db():
             email TEXT NOT NULL UNIQUE,
             ts    INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS orgs (
+            id              TEXT PRIMARY KEY,
+            name            TEXT NOT NULL,
+            slug            TEXT UNIQUE,
+            owner_id        TEXT NOT NULL,
+            port            INTEGER UNIQUE,
+            plan            TEXT NOT NULL DEFAULT 'free',
+            stripe_customer_id TEXT,
+            stripe_subscription_id TEXT,
+            trial_ends_at   INTEGER,
+            created_at      INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS org_memberships (
+            org_id      TEXT NOT NULL,
+            user_id     TEXT NOT NULL,
+            role        TEXT NOT NULL DEFAULT 'member',
+            joined_at   INTEGER NOT NULL,
+            PRIMARY KEY (org_id, user_id)
+        );
         CREATE TABLE IF NOT EXISTS org_invites (
             token       TEXT PRIMARY KEY,
-            owner_id    TEXT NOT NULL,
+            org_id      TEXT NOT NULL,
             email       TEXT,
+            role        TEXT NOT NULL DEFAULT 'member',
             created_at  INTEGER NOT NULL,
             expires_at  INTEGER NOT NULL,
             used_at     INTEGER,
             used_by     TEXT
         );
-        CREATE TABLE IF NOT EXISTS org_members (
-            owner_id    TEXT NOT NULL,
-            member_id   TEXT NOT NULL,
-            member_email TEXT,
-            joined_at   INTEGER NOT NULL,
-            PRIMARY KEY (owner_id, member_id)
-        );
     """)
+    # ── Migrate: user-as-org → proper orgs table ──
+    # If users still have port column and orgs table is empty, migrate
+    try:
+        has_port = conn.execute("SELECT port FROM users LIMIT 1").fetchone()
+    except sqlite3.OperationalError:
+        has_port = None
+    if has_port is not None:
+        org_count = conn.execute("SELECT COUNT(*) FROM orgs").fetchone()[0]
+        if org_count == 0:
+            # Migrate each user to a personal org (org.id = user.id)
+            rows = conn.execute("SELECT id, email, plan, port, created_at, stripe_customer_id, stripe_subscription_id, trial_ends_at FROM users WHERE port IS NOT NULL").fetchall()
+            for r in rows:
+                conn.execute(
+                    "INSERT OR IGNORE INTO orgs (id, name, slug, owner_id, port, plan, stripe_customer_id, stripe_subscription_id, trial_ends_at, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (r["id"], r["email"] or r["id"], None, r["id"], r["port"], r["plan"],
+                     r["stripe_customer_id"], r["stripe_subscription_id"],
+                     r["trial_ends_at"], r["created_at"]))
+                conn.execute(
+                    "INSERT OR IGNORE INTO org_memberships (org_id, user_id, role, joined_at) VALUES (?,?,?,?)",
+                    (r["id"], r["id"], "owner", r["created_at"]))
+            # Migrate old org_members → org_memberships
+            try:
+                old_members = conn.execute("SELECT owner_id, member_id, joined_at FROM org_members").fetchall()
+                for m in old_members:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO org_memberships (org_id, user_id, role, joined_at) VALUES (?,?,?,?)",
+                        (m["owner_id"], m["member_id"], "member", m["joined_at"]))
+            except sqlite3.OperationalError:
+                pass  # org_members table doesn't exist
+            # Migrate old org_invites: owner_id → org_id
+            try:
+                old_invites = conn.execute("SELECT token, owner_id, email, created_at, expires_at, used_at, used_by FROM org_invites WHERE 1").fetchall()
+                # Re-insert with org_id field (already created with new schema, but may have old data)
+                for inv in old_invites:
+                    try:
+                        conn.execute("UPDATE org_invites SET org_id=? WHERE token=?", (inv["owner_id"], inv["token"]))
+                    except sqlite3.OperationalError:
+                        pass
+            except (sqlite3.OperationalError, KeyError):
+                pass
+            conn.commit()
+            print(f"[db] migrated {len(rows)} users to orgs table", flush=True)
     conn.commit()
     return conn
 
 # ── Port allocation ────────────────────────────────────────────────────────────
 def alloc_port(db):
-    used = {r[0] for r in db.execute("SELECT port FROM users WHERE port IS NOT NULL")}
+    used = {r[0] for r in db.execute("SELECT port FROM orgs WHERE port IS NOT NULL")}
+    # Also check legacy users table for transition period
+    try:
+        used |= {r[0] for r in db.execute("SELECT port FROM users WHERE port IS NOT NULL")}
+    except sqlite3.OperationalError:
+        pass
     p = PORT_BASE
     while p in used:
         p += 1
@@ -522,7 +583,7 @@ def _resolve_share_token(token: str) -> int | None:
             return cached[0]
     # Query all running containers
     db = get_db()
-    rows = db.execute("SELECT id, port FROM users WHERE port IS NOT NULL").fetchall()
+    rows = db.execute("SELECT id, port FROM orgs WHERE port IS NOT NULL").fetchall()
     for row in rows:
         port = row["port"]
         try:
@@ -756,10 +817,9 @@ class Handler(BaseHTTPRequestHandler):
             obj = event["data"]["object"]
             if etype == "checkout.session.completed":
                 cust_id = obj.get("customer")
-                clerk_uid = obj.get("client_reference_id")
+                ref_id = obj.get("client_reference_id")  # org_id (or legacy user_id)
                 sub_id = obj.get("subscription")
-                if clerk_uid and cust_id:
-                    # Check if subscription has a trial
+                if ref_id and cust_id:
                     trial_end = None
                     if sub_id:
                         try:
@@ -772,20 +832,28 @@ class Handler(BaseHTTPRequestHandler):
                             pass
                     with _db_lock:
                         db.execute(
+                            "UPDATE orgs SET plan='pro', stripe_customer_id=?, stripe_subscription_id=?, trial_ends_at=? WHERE id=?",
+                            (cust_id, sub_id, trial_end, ref_id))
+                        # Also update legacy users table for transition
+                        db.execute(
                             "UPDATE users SET plan='pro', stripe_customer_id=?, stripe_subscription_id=?, trial_ends_at=? WHERE id=?",
-                            (cust_id, sub_id, trial_end, clerk_uid))
+                            (cust_id, sub_id, trial_end, ref_id))
                         db.commit()
-                    print(f"[stripe] activated pro for {clerk_uid} cust={cust_id} trial_end={trial_end}", flush=True)
+                    print(f"[stripe] activated pro for org {ref_id} cust={cust_id} trial_end={trial_end}", flush=True)
             elif etype == "invoice.paid":
                 cust_id = obj.get("customer")
                 if cust_id:
                     with _db_lock:
+                        db.execute("UPDATE orgs SET plan='pro' WHERE stripe_customer_id=?", (cust_id,))
                         db.execute("UPDATE users SET plan='pro' WHERE stripe_customer_id=?", (cust_id,))
                         db.commit()
             elif etype in ("customer.subscription.deleted", "customer.subscription.paused"):
                 cust_id = obj.get("customer")
                 if cust_id:
                     with _db_lock:
+                        db.execute(
+                            "UPDATE orgs SET plan='free', stripe_subscription_id=NULL WHERE stripe_customer_id=?",
+                            (cust_id,))
                         db.execute(
                             "UPDATE users SET plan='free', stripe_subscription_id=NULL WHERE stripe_customer_id=?",
                             (cust_id,))
@@ -832,6 +900,13 @@ class Handler(BaseHTTPRequestHandler):
                     db.execute(
                         "INSERT INTO users (id, email, plan, port, created_at, last_seen) VALUES (?,?,?,?,?,?)",
                         (user_id, email, "free", port, now, now))
+                    # Create personal org (id = user_id for Docker volume compat)
+                    db.execute(
+                        "INSERT OR IGNORE INTO orgs (id, name, slug, owner_id, port, plan, created_at) VALUES (?,?,?,?,?,?,?)",
+                        (user_id, email or user_id, None, user_id, port, "free", now))
+                    db.execute(
+                        "INSERT OR IGNORE INTO org_memberships (org_id, user_id, role, joined_at) VALUES (?,?,?,?)",
+                        (user_id, user_id, "owner", now))
                     db.commit()
                     print(f"[signup] new user {email} ({user_id}) with passcode", flush=True)
                 else:
@@ -901,13 +976,28 @@ class Handler(BaseHTTPRequestHandler):
                 db.execute(
                     "INSERT INTO users (id, email, plan, port, created_at, last_seen) VALUES (?,?,?,?,?,?)",
                     (user_id, email, "free", port, now, now))
+                db.execute(
+                    "INSERT OR IGNORE INTO orgs (id, name, slug, owner_id, port, plan, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (user_id, email or user_id, None, user_id, port, "free", now))
+                db.execute(
+                    "INSERT OR IGNORE INTO org_memberships (org_id, user_id, role, joined_at) VALUES (?,?,?,?)",
+                    (user_id, user_id, "owner", now))
                 db.commit()
                 row = db.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
             else:
                 db.execute("UPDATE users SET last_seen=? WHERE id=?", (now, user_id))
                 db.commit()
+            # Ensure personal org exists (migration backfill)
+            org_exists = db.execute("SELECT 1 FROM orgs WHERE id=?", (user_id,)).fetchone()
+            if not org_exists and row["port"]:
+                db.execute(
+                    "INSERT OR IGNORE INTO orgs (id, name, slug, owner_id, port, plan, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (user_id, row["email"] or user_id, None, user_id, row["port"], row["plan"], row["created_at"]))
+                db.execute(
+                    "INSERT OR IGNORE INTO org_memberships (org_id, user_id, role, joined_at) VALUES (?,?,?,?)",
+                    (user_id, user_id, "owner", row["created_at"]))
+                db.commit()
 
-        port = row["port"]
         user_email = row["email"] or email
         # If we still don't have an email, fetch from Clerk API and persist it
         if not user_email:
@@ -919,70 +1009,96 @@ class Handler(BaseHTTPRequestHandler):
 
         # ── Gateway-level org/invite interceptors ─────────────────────────────
 
+        # ── Helper: resolve org_id from cookie or default to personal ──
+        def _active_org_id():
+            cookies = _parse_cookies(self.headers.get("Cookie", ""))
+            oid = cookies.get("amux_org", "")
+            if oid:
+                mem = db.execute("SELECT 1 FROM org_memberships WHERE org_id=? AND user_id=?", (oid, user_id)).fetchone()
+                if mem:
+                    return oid
+            return user_id  # personal org
+
+        # ── Helper: check if user has role in org ──
+        def _has_role(org_id, *roles):
+            r = db.execute("SELECT role FROM org_memberships WHERE org_id=? AND user_id=?", (org_id, user_id)).fetchone()
+            return r and r["role"] in roles
+
         # GET /invite/<token> while authenticated → show accept page
         if path.startswith("/invite/") and self.command == "GET":
             tok = path[len("/invite/"):]
             inv = db.execute(
-                "SELECT owner_id FROM org_invites WHERE token=? AND used_at IS NULL AND expires_at > ?",
+                "SELECT org_id FROM org_invites WHERE token=? AND used_at IS NULL AND expires_at > ?",
                 (tok, now)
             ).fetchone()
             if not inv:
                 return self._html("<html><body style='font-family:sans-serif;background:#0a0a0a;color:#e5e5e5;display:flex;align-items:center;justify-content:center;min-height:100vh;'><div style='text-align:center'><h2 style='color:#f87171'>Invite expired or invalid</h2><p style='color:#888;margin-top:8px'>This invite link is no longer valid.</p></div></body></html>", 410)
-            owner = db.execute("SELECT email FROM users WHERE id=?", (inv["owner_id"],)).fetchone()
-            owner_email = owner["email"] if owner else "someone"
-            if inv["owner_id"] == user_id:
+            org = db.execute("SELECT name, owner_id FROM orgs WHERE id=?", (inv["org_id"],)).fetchone()
+            org_label = org["name"] if org else "a workspace"
+            if org and org["owner_id"] == user_id:
                 return self._html("<html><body style='font-family:sans-serif;background:#0a0a0a;color:#e5e5e5;display:flex;align-items:center;justify-content:center;min-height:100vh;'><div style='text-align:center'><h2>That's your own invite link!</h2><p style='color:#888;margin-top:8px'>Share it with someone else.</p></div></body></html>")
-            return self._serve_invite_accept(tok, owner_email)
+            return self._serve_invite_accept(tok, org_label)
 
         # POST /api/gateway/invite/<token>/accept → accept invite, set amux_org, redirect
         if path.startswith("/api/gateway/invite/") and path.endswith("/accept"):
             tok = path[len("/api/gateway/invite/"):-len("/accept")]
             inv = db.execute(
-                "SELECT owner_id FROM org_invites WHERE token=? AND used_at IS NULL AND expires_at > ?",
+                "SELECT org_id, role FROM org_invites WHERE token=? AND used_at IS NULL AND expires_at > ?",
                 (tok, now)
             ).fetchone()
             if not inv:
                 return self._json({"error": "invalid or expired invite"}, 410)
-            owner_id = inv["owner_id"]
+            org_id = inv["org_id"]
+            role = inv["role"] or "member"
             db.execute("UPDATE org_invites SET used_at=?, used_by=? WHERE token=?",
                        (now, user_id, tok))
             db.execute(
-                "INSERT OR IGNORE INTO org_members (owner_id, member_id, member_email, joined_at) "
-                "VALUES (?,?,?,?)", (owner_id, user_id, user_email, now))
+                "INSERT OR IGNORE INTO org_memberships (org_id, user_id, role, joined_at) "
+                "VALUES (?,?,?,?)", (org_id, user_id, role, now))
             db.commit()
-            # Migrate member's session data into owner's container, then stop member's
-            try:
-                _migrate_and_stop_member_container(user_id, owner_id)
-            except Exception as e:
-                print(f"[invite] migration error for {user_id} → {owner_id}: {e}", flush=True)
             sec = self._secure_cookie_flags()
             return self._redirect(
                 self._base_url() + "/",
-                extra_cookies=[f"amux_org={owner_id}; HttpOnly{sec}; SameSite=Lax; Path=/"]
+                extra_cookies=[f"amux_org={org_id}; HttpOnly{sec}; SameSite=Lax; Path=/"]
             )
 
-        # POST /api/org/invites → create gateway-level invite (intercepted before container)
+        # POST /api/org/invites → create invite for an org
         if path == "/api/org/invites" and self.command == "POST":
             import secrets as _sec
             body = self._read_body()
+            org_id = body.get("org_id", "") or _active_org_id()
+            if not _has_role(org_id, "owner", "admin"):
+                return self._json({"error": "must be owner or admin"}, 403)
             tok = _sec.token_urlsafe(24)
             expires = now + 7 * 86400
             db.execute(
-                "INSERT INTO org_invites (token, owner_id, email, created_at, expires_at) "
-                "VALUES (?,?,?,?,?)",
-                (tok, user_id, body.get("email") or None, now, expires)
+                "INSERT INTO org_invites (token, org_id, email, role, created_at, expires_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (tok, org_id, body.get("email") or None, body.get("role", "member"), now, expires)
             )
             db.commit()
             url = f"{self._base_url()}/invite/{tok}"
-            return self._json({"token": tok, "url": url, "expires_at": expires}, 201)
+            return self._json({"token": tok, "url": url, "org_id": org_id, "expires_at": expires}, 201)
 
-        # GET /api/org/invites → list invites created by this user (gateway-level)
+        # GET /api/org/invites → list invites for orgs the user owns/admins
         if path == "/api/org/invites" and self.command == "GET":
+            from urllib.parse import parse_qs
+            params = parse_qs(qs)
+            filter_org = params.get("org_id", [None])[0]
+            if filter_org:
+                owned_orgs = [filter_org] if _has_role(filter_org, "owner", "admin") else []
+            else:
+                owned_orgs = [r["org_id"] for r in db.execute(
+                    "SELECT org_id FROM org_memberships WHERE user_id=? AND role IN ('owner','admin')", (user_id,)
+                ).fetchall()]
+            if not owned_orgs:
+                return self._json([])
+            placeholders = ",".join("?" * len(owned_orgs))
             rows = db.execute(
-                "SELECT token, email, created_at, expires_at, used_at, used_by "
-                "FROM org_invites WHERE owner_id=? AND used_at IS NULL AND expires_at > ? "
-                "ORDER BY created_at DESC",
-                (user_id, now)
+                f"SELECT token, org_id, email, role, created_at, expires_at, used_at, used_by "
+                f"FROM org_invites WHERE org_id IN ({placeholders}) AND used_at IS NULL AND expires_at > ? "
+                f"ORDER BY created_at DESC",
+                (*owned_orgs, now)
             ).fetchall()
             base = self._base_url()
             return self._json([{**dict(r), "url": f"{base}/invite/{r['token']}"} for r in rows])
@@ -990,20 +1106,152 @@ class Handler(BaseHTTPRequestHandler):
         # DELETE /api/org/invites/<token>
         if path.startswith("/api/org/invites/") and self.command == "DELETE":
             tok = path[len("/api/org/invites/"):]
-            db.execute("DELETE FROM org_invites WHERE token=? AND owner_id=?", (tok, user_id))
-            db.commit()
+            # Only org owner/admin can delete
+            inv = db.execute("SELECT org_id FROM org_invites WHERE token=?", (tok,)).fetchone()
+            if inv and _has_role(inv["org_id"], "owner", "admin"):
+                db.execute("DELETE FROM org_invites WHERE token=?", (tok,))
+                db.commit()
             return self._json({"ok": True})
+
+        # ── Org CRUD ─────────────────────────────────────────────────────────
+
+        # POST /api/gateway/orgs → create a new named org
+        if path == "/api/gateway/orgs" and self.command == "POST":
+            import secrets as _sec
+            body = self._read_body()
+            org_name = body.get("name", "").strip()
+            if not org_name:
+                return self._json({"error": "name is required"}, 400)
+            org_id = "org_" + _sec.token_hex(8)
+            org_port = alloc_port(db)
+            with _db_lock:
+                db.execute(
+                    "INSERT INTO orgs (id, name, slug, owner_id, port, plan, created_at) VALUES (?,?,?,?,?,?,?)",
+                    (org_id, org_name, body.get("slug"), user_id, org_port, "free", now))
+                db.execute(
+                    "INSERT INTO org_memberships (org_id, user_id, role, joined_at) VALUES (?,?,?,?)",
+                    (org_id, user_id, "owner", now))
+                db.commit()
+            return self._json({"id": org_id, "name": org_name, "port": org_port}, 201)
 
         # GET /api/gateway/orgs → list orgs accessible to this user
         if path == "/api/gateway/orgs" and self.command == "GET":
-            orgs = [{"id": user_id, "email": user_email, "is_own": True}]
-            member_rows = db.execute(
-                "SELECT u.id, u.email FROM org_members m JOIN users u ON m.owner_id = u.id "
-                "WHERE m.member_id=?", (user_id,)
+            rows = db.execute(
+                "SELECT o.id, o.name, o.slug, o.owner_id, o.plan, m.role "
+                "FROM org_memberships m JOIN orgs o ON m.org_id = o.id "
+                "WHERE m.user_id=? ORDER BY o.created_at",
+                (user_id,)
             ).fetchall()
-            for r in member_rows:
-                orgs.append({"id": r["id"], "email": r["email"], "is_own": False})
-            return self._json(orgs)
+            cookies = _parse_cookies(self.headers.get("Cookie", ""))
+            active = cookies.get("amux_org", user_id)
+            return self._json([{
+                "id": r["id"], "name": r["name"], "slug": r["slug"],
+                "owner_id": r["owner_id"], "plan": r["plan"], "role": r["role"],
+                "is_personal": r["id"] == user_id,
+                "active": r["id"] == active,
+            } for r in rows])
+
+        # GET /api/gateway/orgs/<org_id> → org details
+        if path.startswith("/api/gateway/orgs/") and self.command == "GET" and path.count("/") == 4 and not path.endswith("/members"):
+            org_id = path.split("/")[4]
+            if not db.execute("SELECT 1 FROM org_memberships WHERE org_id=? AND user_id=?", (org_id, user_id)).fetchone():
+                return self._json({"error": "not a member"}, 403)
+            org = db.execute("SELECT * FROM orgs WHERE id=?", (org_id,)).fetchone()
+            if not org:
+                return self._json({"error": "not found"}, 404)
+            members = db.execute(
+                "SELECT m.user_id, m.role, m.joined_at, u.email "
+                "FROM org_memberships m JOIN users u ON m.user_id = u.id "
+                "WHERE m.org_id=? ORDER BY m.joined_at", (org_id,)
+            ).fetchall()
+            return self._json({
+                "id": org["id"], "name": org["name"], "slug": org["slug"],
+                "owner_id": org["owner_id"], "plan": org["plan"],
+                "members": [dict(m) for m in members],
+            })
+
+        # PATCH /api/gateway/orgs/<org_id> → update org
+        if path.startswith("/api/gateway/orgs/") and self.command == "PATCH" and path.count("/") == 4:
+            org_id = path.split("/")[4]
+            if not _has_role(org_id, "owner", "admin"):
+                return self._json({"error": "must be owner or admin"}, 403)
+            body = self._read_body()
+            updates = []
+            params = []
+            if "name" in body:
+                updates.append("name=?")
+                params.append(body["name"])
+            if "slug" in body:
+                updates.append("slug=?")
+                params.append(body["slug"])
+            if updates:
+                params.append(org_id)
+                with _db_lock:
+                    db.execute(f"UPDATE orgs SET {','.join(updates)} WHERE id=?", params)
+                    db.commit()
+            return self._json({"ok": True})
+
+        # DELETE /api/gateway/orgs/<org_id> → delete org (owner only, not personal)
+        if path.startswith("/api/gateway/orgs/") and self.command == "DELETE" and path.count("/") == 4:
+            org_id = path.split("/")[4]
+            if org_id == user_id:
+                return self._json({"error": "cannot delete personal workspace"}, 400)
+            if not _has_role(org_id, "owner"):
+                return self._json({"error": "must be owner"}, 403)
+            org = db.execute("SELECT port FROM orgs WHERE id=?", (org_id,)).fetchone()
+            if org:
+                try:
+                    stop_container(org_id)
+                except Exception:
+                    pass
+                with _db_lock:
+                    db.execute("DELETE FROM org_memberships WHERE org_id=?", (org_id,))
+                    db.execute("DELETE FROM org_invites WHERE org_id=?", (org_id,))
+                    db.execute("DELETE FROM orgs WHERE id=?", (org_id,))
+                    db.commit()
+            return self._json({"ok": True})
+
+        # GET /api/gateway/orgs/<org_id>/members → list members
+        if path.startswith("/api/gateway/orgs/") and path.endswith("/members") and self.command == "GET":
+            org_id = path.split("/")[4]
+            if not db.execute("SELECT 1 FROM org_memberships WHERE org_id=? AND user_id=?", (org_id, user_id)).fetchone():
+                return self._json({"error": "not a member"}, 403)
+            rows = db.execute(
+                "SELECT m.user_id, m.role, m.joined_at, u.email "
+                "FROM org_memberships m JOIN users u ON m.user_id = u.id "
+                "WHERE m.org_id=? ORDER BY m.joined_at", (org_id,)
+            ).fetchall()
+            return self._json([dict(r) for r in rows])
+
+        # DELETE /api/gateway/orgs/<org_id>/members/<user_id> → remove member
+        if path.startswith("/api/gateway/orgs/") and "/members/" in path and self.command == "DELETE":
+            parts = path.split("/")
+            org_id = parts[4]
+            target_uid = parts[6]
+            if not _has_role(org_id, "owner", "admin"):
+                return self._json({"error": "must be owner or admin"}, 403)
+            if target_uid == user_id:
+                return self._json({"error": "cannot remove yourself"}, 400)
+            with _db_lock:
+                db.execute("DELETE FROM org_memberships WHERE org_id=? AND user_id=?", (org_id, target_uid))
+                db.commit()
+            return self._json({"ok": True})
+
+        # PATCH /api/gateway/orgs/<org_id>/members/<user_id> → change role
+        if path.startswith("/api/gateway/orgs/") and "/members/" in path and self.command == "PATCH":
+            parts = path.split("/")
+            org_id = parts[4]
+            target_uid = parts[6]
+            if not _has_role(org_id, "owner"):
+                return self._json({"error": "must be owner"}, 403)
+            body = self._read_body()
+            new_role = body.get("role", "member")
+            if new_role not in ("owner", "admin", "member"):
+                return self._json({"error": "invalid role"}, 400)
+            with _db_lock:
+                db.execute("UPDATE org_memberships SET role=? WHERE org_id=? AND user_id=?", (new_role, org_id, target_uid))
+                db.commit()
+            return self._json({"ok": True})
 
         # POST /api/gateway/switch-org → set amux_org cookie
         if path == "/api/gateway/switch-org" and self.command == "POST":
@@ -1011,13 +1259,13 @@ class Handler(BaseHTTPRequestHandler):
             org_id = body.get("org_id", "").strip()
             sec = self._secure_cookie_flags()
             if org_id == user_id or not org_id:
-                # Switch back to own workspace
+                # Switch back to personal workspace
                 return self._redirect(
                     self._base_url() + "/",
                     extra_cookies=[f"amux_org=; Max-Age=0; Path=/; HttpOnly{sec}; SameSite=Lax"]
                 )
             member_row = db.execute(
-                "SELECT 1 FROM org_members WHERE owner_id=? AND member_id=?",
+                "SELECT 1 FROM org_memberships WHERE org_id=? AND user_id=?",
                 (org_id, user_id)
             ).fetchone()
             if not member_row:
@@ -1027,50 +1275,55 @@ class Handler(BaseHTTPRequestHandler):
                 extra_cookies=[f"amux_org={org_id}; HttpOnly{sec}; SameSite=Lax; Path=/"]
             )
 
-        # GET /api/gateway/members → list members of your workspace
+        # GET /api/gateway/members → list members of active org (backward compat)
         if path == "/api/gateway/members" and self.command == "GET":
+            active_org = _active_org_id()
             rows = db.execute(
-                "SELECT COALESCE(NULLIF(u.email,''), m.member_email) AS email, m.member_id, m.joined_at "
-                "FROM org_members m JOIN users u ON m.member_id = u.id "
-                "WHERE m.owner_id=? ORDER BY m.joined_at",
-                (user_id,)
+                "SELECT m.user_id AS member_id, u.email, m.role, m.joined_at "
+                "FROM org_memberships m JOIN users u ON m.user_id = u.id "
+                "WHERE m.org_id=? AND m.user_id != ? ORDER BY m.joined_at",
+                (active_org, active_org)  # exclude the org itself for personal orgs
             ).fetchall()
             return self._json([dict(r) for r in rows])
 
-        # DELETE /api/gateway/members/<member_id> → remove from workspace
+        # DELETE /api/gateway/members/<member_id> → remove from active org (backward compat)
         if path.startswith("/api/gateway/members/") and self.command == "DELETE":
             mid = path[len("/api/gateway/members/"):]
-            db.execute("DELETE FROM org_members WHERE owner_id=? AND member_id=?", (user_id, mid))
-            db.commit()
+            active_org = _active_org_id()
+            if not _has_role(active_org, "owner", "admin"):
+                return self._json({"error": "must be owner or admin"}, 403)
+            with _db_lock:
+                db.execute("DELETE FROM org_memberships WHERE org_id=? AND user_id=?", (active_org, mid))
+                db.commit()
             return self._json({"ok": True})
 
-        # ── Stripe billing (authenticated) ────────────────────────────────────
+        # ── Stripe billing (authenticated, org-scoped) ─────────────────────────
         if path == "/api/stripe/checkout" and self.command == "POST":
             if not STRIPE_SECRET_KEY or not STRIPE_PRO_PRICE_ID:
                 return self._json({"error": "billing not configured"}, 503)
             body = self._read_body()
             billing = body.get("billing", "monthly")  # "monthly" or "annual"
+            target_org = body.get("org_id", "") or _active_org_id()
+            if not _has_role(target_org, "owner", "admin"):
+                return self._json({"error": "must be owner or admin to manage billing"}, 403)
             price_id = STRIPE_ANNUAL_PRICE_ID if billing == "annual" and STRIPE_ANNUAL_PRICE_ID else STRIPE_PRO_PRICE_ID
             import stripe
             stripe.api_key = STRIPE_SECRET_KEY
             base = self._base_url()
-            # Check if user already has a Stripe customer (no trial for returning)
-            row_u = db.execute("SELECT stripe_customer_id, trial_ends_at FROM users WHERE id=?", (user_id,)).fetchone()
-            has_had_trial = row_u and (row_u["stripe_customer_id"] or row_u["trial_ends_at"])
+            org_row = db.execute("SELECT stripe_customer_id, trial_ends_at FROM orgs WHERE id=?", (target_org,)).fetchone()
+            has_had_trial = org_row and (org_row["stripe_customer_id"] or org_row["trial_ends_at"])
             checkout_params = dict(
                 mode="subscription",
                 line_items=[{"price": price_id, "quantity": 1}],
-                client_reference_id=user_id,
+                client_reference_id=target_org,  # org_id as reference
                 success_url=base + "/?billing=success",
                 cancel_url=base + "/?billing=cancel",
                 allow_promotion_codes=True,
             )
-            # Attach existing customer or set email for new
-            if row_u and row_u["stripe_customer_id"]:
-                checkout_params["customer"] = row_u["stripe_customer_id"]
+            if org_row and org_row["stripe_customer_id"]:
+                checkout_params["customer"] = org_row["stripe_customer_id"]
             else:
                 checkout_params["customer_email"] = user_email
-            # 7-day free trial for first-time subscribers
             if not has_had_trial and TRIAL_DAYS > 0:
                 checkout_params["subscription_data"] = {
                     "trial_period_days": TRIAL_DAYS,
@@ -1081,8 +1334,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/stripe/portal" and self.command == "POST":
             if not STRIPE_SECRET_KEY:
                 return self._json({"error": "billing not configured"}, 503)
-            row_u = db.execute("SELECT stripe_customer_id FROM users WHERE id=?", (user_id,)).fetchone()
-            cust_id = row_u["stripe_customer_id"] if row_u else None
+            body = self._read_body()
+            target_org = body.get("org_id", "") or _active_org_id()
+            org_row = db.execute("SELECT stripe_customer_id FROM orgs WHERE id=?", (target_org,)).fetchone()
+            cust_id = org_row["stripe_customer_id"] if org_row else None
             if not cust_id:
                 return self._json({"error": "no billing account"}, 404)
             import stripe
@@ -1095,50 +1350,42 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"url": ps.url})
 
         if path == "/api/stripe/status" and self.command == "GET":
-            row_u = db.execute("SELECT plan, stripe_customer_id, trial_ends_at FROM users WHERE id=?", (user_id,)).fetchone()
-            now = int(time.time())
-            trial_ends = row_u["trial_ends_at"] if row_u else None
-            in_trial = bool(trial_ends and trial_ends > now)
+            target_org = _active_org_id()
+            org_row = db.execute("SELECT plan, stripe_customer_id, trial_ends_at FROM orgs WHERE id=?", (target_org,)).fetchone()
+            now_ts = int(time.time())
+            trial_ends = org_row["trial_ends_at"] if org_row else None
+            in_trial = bool(trial_ends and trial_ends > now_ts)
             return self._json({
-                "plan": row_u["plan"] if row_u else "free",
-                "has_billing": bool(row_u and row_u["stripe_customer_id"]),
+                "plan": org_row["plan"] if org_row else "free",
+                "has_billing": bool(org_row and org_row["stripe_customer_id"]),
                 "stripe_configured": bool(STRIPE_SECRET_KEY),
                 "trial_ends_at": trial_ends,
                 "in_trial": in_trial,
                 "trial_days": TRIAL_DAYS,
                 "has_annual": bool(STRIPE_ANNUAL_PRICE_ID),
+                "org_id": target_org,
             })
 
-        # ── Determine target container ─────────────────────────────────────────
-        # Org members always share the owner's container — no separate workspace.
-        target_user_id = user_id
-        target_port = port
-        target_email = user_email
+        # ── Determine target container via active org ─────────────────────────
+        active_org = _active_org_id()
+        org_data = db.execute("SELECT id, port FROM orgs WHERE id=?", (active_org,)).fetchone()
+        if not org_data or not org_data["port"]:
+            return self._json({"error": "workspace not found"}, 404)
+        target_org_id = org_data["id"]
+        target_port = org_data["port"]
 
-        # Check if this user is a member of someone else's org
-        org_row = db.execute(
-            "SELECT m.owner_id, u.port, u.email FROM org_members m "
-            "JOIN users u ON m.owner_id = u.id WHERE m.member_id=?",
-            (user_id,)
-        ).fetchone()
-        if org_row and org_row["port"]:
-            target_user_id = org_row["owner_id"]
-            target_port = org_row["port"]
-            # Keep the member's own email for X-Amux-User-Email header
-            # Also refresh the owner's last_seen so the reaper doesn't kill
-            # the shared container while an org member is actively using it.
-            now = int(time.time())
-            db.execute("UPDATE users SET last_seen=? WHERE id=?", (now, target_user_id))
-            db.commit()
+        # Refresh user's last_seen
+        db.execute("UPDATE users SET last_seen=? WHERE id=?", (now, user_id))
+        db.commit()
 
         # Wake target container if needed
-        if not container_healthy(target_user_id):
+        if not container_healthy(target_org_id):
             try:
-                start_container(target_user_id, target_port)
+                start_container(target_org_id, target_port)
             except Exception as e:
                 return self._json({"error": f"failed to start instance: {e}"}, 503)
 
-        proxy(self, target_port, path, qs, user_email=target_email, user_id=target_user_id)
+        proxy(self, target_port, path, qs, user_email=user_email, user_id=target_org_id)
 
     def do_GET(self):    self._handle()
     def do_POST(self):   self._handle()
