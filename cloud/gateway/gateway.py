@@ -331,6 +331,24 @@ def get_db():
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE orgs ADD COLUMN api_key TEXT")
         conn.commit()
+    # Migrate: add org_id + role columns to org_invites if missing (old schema had owner_id)
+    try:
+        conn.execute("SELECT org_id FROM org_invites LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            conn.execute("ALTER TABLE org_invites ADD COLUMN org_id TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE org_invites ADD COLUMN role TEXT NOT NULL DEFAULT 'member'")
+        except sqlite3.OperationalError:
+            pass
+        # Backfill org_id from owner_id
+        try:
+            conn.execute("UPDATE org_invites SET org_id = owner_id WHERE org_id = ''")
+        except sqlite3.OperationalError:
+            pass
+        conn.commit()
     conn.commit()
     return conn
 
