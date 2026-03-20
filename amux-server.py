@@ -11931,93 +11931,6 @@ function handlePeekFileInput(e) {
   e.target.value = '';
 }
 
-// ── Microphone / transcription ──
-let _micRecorder = null;
-let _micChunks = [];
-let _micActive = false;
-
-async function _checkTranscription() {
-  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
-  try {
-    const r = await fetch(API + '/api/transcribe');
-    const d = await r.json();
-    if (d.available) document.getElementById('peek-mic-btn').style.display = '';
-  } catch(e) {}
-}
-
-function _bufToB64(buf) {
-  const bytes = new Uint8Array(buf);
-  let bin = '';
-  const chunk = 8192;
-  for (let i = 0; i < bytes.length; i += chunk)
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  return btoa(bin);
-}
-
-async function toggleMic() {
-  const btn = document.getElementById('peek-mic-btn');
-  if (_micActive) {
-    _micRecorder && _micRecorder.stop();
-    return;
-  }
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    _micChunks = [];
-    _micActive = true;
-    btn.textContent = '\u23F9';
-    btn.classList.add('mic-active');
-    _micRecorder = new MediaRecorder(stream);
-    _micRecorder.ondataavailable = e => { if (e.data.size > 0) _micChunks.push(e.data); };
-    _micRecorder.onstop = async () => {
-      _micActive = false;
-      btn.classList.remove('mic-active');
-      stream.getTracks().forEach(t => t.stop());
-      btn.textContent = '\u23F3';
-      try {
-        const blob = new Blob(_micChunks, { type: _micRecorder.mimeType || 'audio/webm' });
-        const b64 = _bufToB64(await blob.arrayBuffer());
-        const r = await fetch(API + '/api/transcribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ data: b64, mime: blob.type }),
-        });
-        const d = await r.json();
-        if (d.text) {
-          const inp = document.getElementById('peek-cmd-input');
-          inp.value = (inp.value ? inp.value + ' ' : '') + d.text;
-          autoGrow(inp);
-          inp.focus();
-        } else {
-          const msg = 'Transcription failed: ' + (d.error || 'unknown');
-          showToast(msg);
-        }
-      } catch(e) {
-        showToast('Transcription error: ' + e.message);
-      } finally {
-        btn.textContent = '\u{1F3A4}';
-      }
-    };
-    _micRecorder.start();
-  } catch(e) {
-    _micActive = false;
-    btn.classList.remove('mic-active');
-    btn.textContent = '\u{1F3A4}';
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      const isPwa = window.matchMedia('(display-mode: standalone)').matches || navigator.standalone;
-      if (isPwa) {
-        showToast('Mic unavailable in PWA — open in Safari and try again, or update to iOS 16.4+');
-      } else {
-        showToast('Mic unavailable — requires HTTPS or localhost');
-      }
-    } else if (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError') {
-      showToast('Microphone blocked — System Settings → Privacy & Security → Microphone → allow Safari');
-    } else if (e.name === 'NotFoundError' || e.name === 'DevicesNotFoundError') {
-      showToast('No microphone found');
-    } else {
-      showToast('Mic error: ' + (e.message || e.name || 'unknown'));
-    }
-  }
-}
 
 let _slashAcSuppressNext = false;
 function handlePeekPaste(e) {
@@ -18070,7 +17983,6 @@ function enablePollingFallback() {
 // Start SSE (falls back to polling on failure)
 connectSSE();
 _updateNotifBtn();
-_checkTranscription();
 
 // Register service worker for offline asset caching
 if ('serviceWorker' in navigator) {
@@ -23142,59 +23054,6 @@ class CCHandler(BaseHTTPRequestHandler):
                     pass
             return self._json({"path": str(save_path), "name": filename, "url": f"/api/uploads/{save_name}"})
 
-        # ── Transcription (OpenAI Whisper) ──
-        if path == "/api/transcribe":
-            key = os.environ.get("OPENAI_API_KEY", "")
-            if method == "GET":
-                return self._json({"available": bool(key)})
-            if method == "POST":
-                if not key:
-                    return self._json({"error": "transcription not configured"}, 503)
-                body = self._read_body()
-                audio_b64 = body.get("data", "")
-                mime = body.get("mime", "audio/webm")
-                ext = "webm" if "webm" in mime else "wav" if "wav" in mime else "m4a" if "m4a" in mime or "mp4" in mime else "webm"
-                try:
-                    audio_data = base64.b64decode(audio_b64)
-                except Exception:
-                    return self._json({"error": "invalid base64"}, 400)
-                boundary = uuid.uuid4().hex
-                parts = [
-                    (f'--{boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1').encode(),
-                    (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.{ext}"\r\nContent-Type: {mime}\r\n\r\n').encode() + audio_data,
-                    (f'--{boundary}--').encode(),
-                ]
-                multipart = b"\r\n".join(parts)
-                import urllib.request as _urq
-                import urllib.error as _urqe
-                req = _urq.Request(
-                    "https://api.openai.com/v1/audio/transcriptions",
-                    data=multipart,
-                    headers={
-                        "Authorization": f"Bearer {key}",
-                        "Content-Type": f"multipart/form-data; boundary={boundary}",
-                    },
-                )
-                try:
-                    import ssl as _ssl
-                    try:
-                        import certifi as _certifi
-                        _ssl_ctx = _ssl.create_default_context(cafile=_certifi.where())
-                    except ImportError:
-                        _ssl_ctx = _ssl.create_default_context()
-                    with _urq.urlopen(req, timeout=30, context=_ssl_ctx) as r:
-                        result = json.loads(r.read())
-                    return self._json({"text": result.get("text", "")})
-                except _urqe.HTTPError as e:
-                    try:
-                        err_body = json.loads(e.read().decode("utf-8", errors="replace"))
-                        err_msg = err_body.get("error", {}).get("message", str(e))
-                    except Exception:
-                        err_msg = str(e)
-                    _log_event("transcribe", "error", detail=f"HTTP {e.code}: {err_msg}", level="warn")
-                    return self._json({"error": err_msg}, e.code)
-                except Exception as e:
-                    return self._json({"error": str(e)}, 500)
 
         # ── Serve uploaded files ──
         if method == "GET" and path.startswith("/api/uploads/"):
