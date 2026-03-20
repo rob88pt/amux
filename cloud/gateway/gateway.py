@@ -1440,6 +1440,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if source == "container":
                 org_id = params.get("org_id", [""])[0] or _active_org_id()
+                # Verify user is a member of this org
+                with _db_lock:
+                    if not db.execute("SELECT 1 FROM org_memberships WHERE org_id=? AND user_id=?", (org_id, user_id)).fetchone():
+                        return self._json({"error": "not a member of this workspace"}, 403)
                 try:
                     result = subprocess.run(
                         ["docker", "logs", "--tail", str(lines), f"amux-user-{org_id}"],
