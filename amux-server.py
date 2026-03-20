@@ -18395,10 +18395,12 @@ function _switchServerUrl(idx, evt) {
   const url = s.url.replace(/\/+$/, '') + '/?_sync=' + encodeURIComponent(payload);
   // Same-origin: navigate in place. Cross-origin: open new tab so PWA stays accessible
   // if the destination is unreachable from this device (e.g. localhost from mobile).
+  // In native iOS WKWebView, window.open is blocked — always navigate in place.
   try {
     const destOrigin = new URL(url).origin;
-    if (destOrigin === location.origin) { location.href = url; }
-    else { window.open(url, '_blank'); }
+    const isNativeApp = window.navigator.standalone || /AmuxApp/.test(navigator.userAgent) || !window.open;
+    if (destOrigin === location.origin || isNativeApp) { location.href = url; }
+    else { window.open(url, '_blank') || (location.href = url); }
   } catch(e) { location.href = url; }
 }
 
@@ -18418,10 +18420,12 @@ function switchServer(idx) {
   }));
   const url = s.url + '/?_sync=' + encodeURIComponent(payload);
   // Same-origin: navigate in place. Cross-origin: open new tab to keep current PWA accessible.
+  // In native iOS WKWebView, window.open is blocked — always navigate in place.
   try {
     const destOrigin = new URL(url).origin;
-    if (destOrigin === location.origin) { location.href = url; }
-    else { window.open(url, '_blank'); }
+    const isNativeApp = window.navigator.standalone || /AmuxApp/.test(navigator.userAgent) || !window.open;
+    if (destOrigin === location.origin || isNativeApp) { location.href = url; }
+    else { window.open(url, '_blank') || (location.href = url); }
   } catch(e) { location.href = url; }
 }
 
