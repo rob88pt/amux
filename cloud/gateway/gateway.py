@@ -142,8 +142,12 @@ _LOGIN_HTML = """<!DOCTYPE html>
           await window.Clerk.signOut();
         }
         if (window.Clerk.user) { await exchangeAndRedirect(); return; }
-        // Native iOS app can't handle Clerk's popup-based OAuth — use redirect flow
-        if (/AmuxApp/.test(navigator.userAgent)) {
+        // WKWebView and standalone PWA can't handle Clerk's popup-based OAuth.
+        // Detect: native app (AmuxApp UA), standalone PWA, or any iOS webview.
+        const isNative = /AmuxApp/.test(navigator.userAgent);
+        const isStandalone = window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
+        const isIOSWebView = /iPhone|iPad/.test(navigator.userAgent) && !/Safari\//.test(navigator.userAgent);
+        if (isNative || isStandalone || isIOSWebView) {
           window.Clerk.redirectToSignIn({ redirectUrl: window.location.origin + '/' });
           return;
         }
