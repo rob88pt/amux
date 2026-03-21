@@ -142,6 +142,11 @@ _LOGIN_HTML = """<!DOCTYPE html>
           await window.Clerk.signOut();
         }
         if (window.Clerk.user) { await exchangeAndRedirect(); return; }
+        // Native iOS app can't handle Clerk's popup-based OAuth — use redirect flow
+        if (/AmuxApp/.test(navigator.userAgent)) {
+          window.Clerk.redirectToSignIn({ redirectUrl: window.location.origin + '/' });
+          return;
+        }
         window.Clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'hash' });
         window.Clerk.addListener(({ user }) => {
           if (user && !exchanging) exchangeAndRedirect();
