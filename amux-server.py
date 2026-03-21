@@ -245,6 +245,131 @@ def _bu_screenshot(session: str = "amux", path: str = "") -> dict:
         return {"path": dest, "size": size}
     return result
 
+# ── Terminal (PTY) session management ─────────────────────────────────────────
+import pty
+import fcntl
+import struct
+import select
+import signal
+
+_terminals: dict[str, dict] = {}  # id -> {pid, fd, created, host, cols, rows}
+_term_lock = threading.Lock()
+
+def _term_create(host: str = "", cols: int = 120, rows: int = 40) -> dict:
+    """Spawn a PTY shell (local or SSH)."""
+    env = os.environ.copy()
+    env["TERM"] = "xterm-256color"
+    env["COLORTERM"] = "truecolor"
+    env["LANG"] = env.get("LANG", "en_US.UTF-8")
+
+    if host and host != "local":
+        # SSH to remote host
+        cmd = ["ssh", "-o", "StrictHostKeyChecking=accept-new",
+               "-o", "ServerAliveInterval=30", "-t", host]
+    else:
+        # Local shell
+        shell = os.environ.get("SHELL", "/bin/bash")
+        cmd = [shell, "-l"]
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        # Child — exec the command
+        os.execvpe(cmd[0], cmd, env)
+    else:
+        # Parent — set terminal size
+        fcntl.ioctl(fd, termios_TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        # Make fd non-blocking
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        tid = f"term-{uuid.uuid4().hex[:8]}"
+        with _term_lock:
+            _terminals[tid] = {
+                "pid": pid, "fd": fd, "created": int(time.time()),
+                "host": host or "local", "cols": cols, "rows": rows,
+            }
+        return {"id": tid, "host": host or "local", "cols": cols, "rows": rows}
+
+# TIOCSWINSZ constant
+try:
+    import termios
+    termios_TIOCSWINSZ = termios.TIOCSWINSZ
+except (ImportError, AttributeError):
+    termios_TIOCSWINSZ = 0x5414  # Linux default
+
+def _term_read(tid: str, max_bytes: int = 65536) -> bytes:
+    """Read available output from terminal."""
+    with _term_lock:
+        t = _terminals.get(tid)
+    if not t:
+        return b""
+    fd = t["fd"]
+    try:
+        ready, _, _ = select.select([fd], [], [], 0.05)
+        if ready:
+            return os.read(fd, max_bytes)
+    except (OSError, IOError):
+        pass
+    return b""
+
+def _term_write(tid: str, data: bytes):
+    """Write input to terminal."""
+    with _term_lock:
+        t = _terminals.get(tid)
+    if not t:
+        return
+    try:
+        os.write(t["fd"], data)
+    except (OSError, IOError):
+        pass
+
+def _term_resize(tid: str, cols: int, rows: int):
+    """Resize terminal."""
+    with _term_lock:
+        t = _terminals.get(tid)
+    if not t:
+        return
+    try:
+        fcntl.ioctl(t["fd"], termios_TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        t["cols"] = cols
+        t["rows"] = rows
+        # Send SIGWINCH to the process group
+        os.kill(t["pid"], signal.SIGWINCH)
+    except (OSError, IOError):
+        pass
+
+def _term_destroy(tid: str):
+    """Kill terminal session."""
+    with _term_lock:
+        t = _terminals.pop(tid, None)
+    if not t:
+        return
+    try:
+        os.kill(t["pid"], signal.SIGHUP)
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        os.close(t["fd"])
+    except OSError:
+        pass
+    try:
+        os.waitpid(t["pid"], os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass
+
+def _term_alive(tid: str) -> bool:
+    """Check if terminal process is still running."""
+    with _term_lock:
+        t = _terminals.get(tid)
+    if not t:
+        return False
+    try:
+        pid, status = os.waitpid(t["pid"], os.WNOHANG)
+        return pid == 0  # 0 means still running
+    except (ChildProcessError, OSError):
+        return False
+
+
 # SSE shared cache — avoids redundant subprocess calls when multiple tabs connect
 _sse_cache = {
     "sessions": {"data": None, "json": "", "time": 0},
@@ -4900,6 +5025,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quill@2.0.3/dist/quill.snow.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/quilljs-markdown@latest/dist/quilljs-markdown-common-style.css">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -7816,6 +7942,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <button id="tab-map" onclick="switchView('map')">Map</button>
   <button id="tab-metrics" onclick="switchView('metrics')">Metrics</button>
   <button id="tab-torrents" onclick="switchView('torrents')">Torrents</button>
+  <button id="tab-terminal" onclick="switchView('terminal')">Terminal</button>
 </div>
 <div class="tab-customize-wrap">
   <button class="tab-customize-btn" onclick="event.stopPropagation();toggleTabCustomizer()" title="Show/hide tabs">&#x229E;</button>
@@ -8280,6 +8407,33 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
   <div id="torrent-list" style="display:flex;flex-direction:column;gap:6px;overflow-y:auto;flex:1;"></div>
   <div id="torrent-empty" style="color:var(--dim);font-size:0.85rem;text-align:center;padding:40px;">No torrents. Paste a magnet link above to start downloading.</div>
+</div>
+
+<!-- Terminal view -->
+<div id="terminal-view" style="display:none;flex-direction:column;flex:1;min-height:0;">
+  <div class="term-toolbar" style="display:flex;align-items:center;gap:8px;padding:0 0 6px 0;flex-wrap:wrap;">
+    <select id="term-profile" style="font-size:0.78rem;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;">
+      <option value="local">Local Shell</option>
+    </select>
+    <input id="term-host" type="text" placeholder="user@host" style="width:180px;font-size:0.78rem;padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--fg);font-family:inherit;">
+    <button id="term-connect-btn" onclick="_termConnect()" style="padding:4px 12px;background:var(--accent);color:#fff;border:none;border-radius:4px;font-size:0.78rem;cursor:pointer;">Connect</button>
+    <button id="term-disconnect-btn" onclick="_termDisconnect()" style="display:none;padding:4px 12px;background:var(--danger,#e74c3c);color:#fff;border:none;border-radius:4px;font-size:0.78rem;cursor:pointer;">Disconnect</button>
+    <div style="flex:1;"></div>
+    <span id="term-status" style="font-size:0.68rem;color:var(--dim);"></span>
+    <select id="term-fontsize" onchange="_termSetFontSize(this.value)" style="font-size:0.72rem;padding:2px 4px;background:var(--surface);border:1px solid var(--border);border-radius:4px;color:var(--fg);">
+      <option value="12">12px</option>
+      <option value="13">13px</option>
+      <option value="14" selected>14px</option>
+      <option value="15">15px</option>
+      <option value="16">16px</option>
+      <option value="18">18px</option>
+    </select>
+  </div>
+  <div id="term-container" style="flex:1;min-height:0;background:#0d1117;border-radius:6px;overflow:hidden;position:relative;">
+    <div id="term-placeholder" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--dim);font-size:0.9rem;">
+      Enter a host above and click Connect, or leave blank for a local shell
+    </div>
+  </div>
 </div>
 
 <!-- Video player overlay -->
@@ -14793,6 +14947,7 @@ function switchView(view) {
   document.getElementById('map-view').style.display = view === 'map' ? 'flex' : 'none';
   document.getElementById('metrics-view').style.display = view === 'metrics' ? 'flex' : 'none';
   document.getElementById('torrents-view').style.display = view === 'torrents' ? 'flex' : 'none';
+  document.getElementById('terminal-view').style.display = view === 'terminal' ? 'flex' : 'none';
   document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
   document.getElementById('tab-board').classList.toggle('active', view === 'board');
   document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
@@ -14804,7 +14959,9 @@ function switchView(view) {
   document.getElementById('tab-map').classList.toggle('active', view === 'map');
   document.getElementById('tab-metrics').classList.toggle('active', view === 'metrics');
   document.getElementById('tab-torrents').classList.toggle('active', view === 'torrents');
+  document.getElementById('tab-terminal').classList.toggle('active', view === 'terminal');
   if (view === 'torrents') _torrentLoad();
+  if (view === 'terminal') _termInit();
   if (view === 'crm') { _crmDirty = false; _crmLoad(); _crmApplySidebarState(); } // always refresh on tab switch
   if (view === 'map') { _mapLoad(); _mapInit(); }
   if (view === 'metrics') { _metricsLoad(); _metricsApplySidebarState(); } // always refresh on tab switch
@@ -19860,6 +20017,206 @@ document.getElementById('video-overlay').addEventListener('keydown', e => {
 // Enter key in magnet input
 document.getElementById('torrent-magnet').addEventListener('keydown', e => { if (e.key === 'Enter') _torrentAdd(); });
 
+// ── Terminal tab ──────────────────────────────────────────────────────────────
+let _term = null;       // xterm.js Terminal instance
+let _termFit = null;    // FitAddon
+let _termId = null;     // server PTY session id
+let _termPoll = null;   // polling interval
+let _termInited = false;
+
+function _termInit() {
+  if (_termInited) {
+    if (_term && _termFit) setTimeout(() => _termFit.fit(), 50);
+    return;
+  }
+  _termInited = true;
+  // Load saved font size
+  const savedSize = localStorage.getItem('amux_term_fontsize');
+  if (savedSize) document.getElementById('term-fontsize').value = savedSize;
+  // Load saved hosts
+  const savedHosts = JSON.parse(localStorage.getItem('amux_term_hosts') || '[]');
+  const sel = document.getElementById('term-profile');
+  savedHosts.forEach(h => {
+    const opt = document.createElement('option');
+    opt.value = h; opt.textContent = h;
+    sel.appendChild(opt);
+  });
+}
+
+async function _termConnect() {
+  const hostInput = document.getElementById('term-host').value.trim();
+  const profileSel = document.getElementById('term-profile');
+  const host = hostInput || (profileSel.value === 'local' ? '' : profileSel.value);
+
+  // Save to recent hosts
+  if (host) {
+    let hosts = JSON.parse(localStorage.getItem('amux_term_hosts') || '[]');
+    hosts = hosts.filter(h => h !== host);
+    hosts.unshift(host);
+    hosts = hosts.slice(0, 20);
+    localStorage.setItem('amux_term_hosts', JSON.stringify(hosts));
+    // Add to dropdown if not there
+    const sel = document.getElementById('term-profile');
+    if (!Array.from(sel.options).some(o => o.value === host)) {
+      const opt = document.createElement('option');
+      opt.value = host; opt.textContent = host;
+      sel.appendChild(opt);
+    }
+  }
+
+  // Create PTY on server
+  const fontSize = parseInt(document.getElementById('term-fontsize').value) || 14;
+  const container = document.getElementById('term-container');
+
+  // Remove placeholder
+  const ph = document.getElementById('term-placeholder');
+  if (ph) ph.remove();
+
+  // Destroy old terminal if exists
+  if (_term) {
+    _term.dispose();
+    _term = null;
+  }
+  if (_termPoll) { clearInterval(_termPoll); _termPoll = null; }
+  if (_termId) {
+    fetch(API + '/api/terminal/' + _termId, { method: 'DELETE' }).catch(() => {});
+    _termId = null;
+  }
+
+  // Create xterm.js instance
+  _term = new Terminal({
+    cursorBlink: true,
+    cursorStyle: 'block',
+    fontSize: fontSize,
+    fontFamily: "'JetBrains Mono', 'Menlo', 'Monaco', 'Courier New', monospace",
+    theme: {
+      background: '#0d1117',
+      foreground: '#c9d1d9',
+      cursor: '#58a6ff',
+      cursorAccent: '#0d1117',
+      selectionBackground: 'rgba(56,139,253,0.3)',
+      black: '#484f58',   red: '#ff7b72',    green: '#3fb950',  yellow: '#d29922',
+      blue: '#58a6ff',    magenta: '#bc8cff', cyan: '#39d353',   white: '#b1bac4',
+      brightBlack: '#6e7681', brightRed: '#ffa198', brightGreen: '#56d364', brightYellow: '#e3b341',
+      brightBlue: '#79c0ff',  brightMagenta: '#d2a8ff', brightCyan: '#56d364', brightWhite: '#f0f6fc',
+    },
+    scrollback: 10000,
+    allowProposedApi: true,
+    macOptionIsMeta: true,
+    macOptionClickForcesSelection: true,
+    rightClickSelectsWord: true,
+    allowTransparency: false,
+  });
+
+  _termFit = new FitAddon.FitAddon();
+  _term.loadAddon(_termFit);
+  _term.loadAddon(new WebLinksAddon.WebLinksAddon());
+
+  _term.open(container);
+  _termFit.fit();
+
+  const dims = _termFit.proposeDimensions();
+  const cols = dims ? dims.cols : 120;
+  const rows = dims ? dims.rows : 40;
+
+  document.getElementById('term-status').textContent = host ? 'Connecting to ' + host + '...' : 'Starting local shell...';
+
+  try {
+    const r = await fetch(API + '/api/terminal/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host, cols, rows }),
+    });
+    const data = await r.json();
+    if (data.error) {
+      _term.writeln('\r\n\x1b[31mError: ' + data.error + '\x1b[0m');
+      document.getElementById('term-status').textContent = 'Error';
+      return;
+    }
+    _termId = data.id;
+  } catch (e) {
+    _term.writeln('\r\n\x1b[31mFailed to create terminal: ' + e.message + '\x1b[0m');
+    document.getElementById('term-status').textContent = 'Error';
+    return;
+  }
+
+  document.getElementById('term-status').textContent = host ? 'Connected: ' + host : 'Local shell';
+  document.getElementById('term-connect-btn').style.display = 'none';
+  document.getElementById('term-disconnect-btn').style.display = '';
+
+  // Send keyboard input to server
+  _term.onData(data => {
+    if (!_termId) return;
+    fetch(API + '/api/terminal/' + _termId + '/input', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ data: btoa(unescape(encodeURIComponent(data))) }),
+    }).catch(() => {});
+  });
+
+  // Handle resize
+  _term.onResize(({ cols, rows }) => {
+    if (!_termId) return;
+    fetch(API + '/api/terminal/' + _termId + '/resize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cols, rows }),
+    }).catch(() => {});
+  });
+
+  // Poll for output
+  _termPoll = setInterval(async () => {
+    if (!_termId) return;
+    try {
+      const r = await fetch(API + '/api/terminal/' + _termId + '/output');
+      const d = await r.json();
+      if (d.data) {
+        const bytes = Uint8Array.from(atob(d.data), c => c.charCodeAt(0));
+        _term.write(bytes);
+      }
+      if (!d.alive) {
+        _term.writeln('\r\n\x1b[33m[Process exited]\x1b[0m');
+        document.getElementById('term-status').textContent = 'Disconnected';
+        clearInterval(_termPoll);
+        _termPoll = null;
+        document.getElementById('term-connect-btn').style.display = '';
+        document.getElementById('term-disconnect-btn').style.display = 'none';
+      }
+    } catch (e) {}
+  }, 50);
+
+  _term.focus();
+}
+
+function _termDisconnect() {
+  if (_termPoll) { clearInterval(_termPoll); _termPoll = null; }
+  if (_termId) {
+    fetch(API + '/api/terminal/' + _termId, { method: 'DELETE' }).catch(() => {});
+    _termId = null;
+  }
+  if (_term) {
+    _term.writeln('\r\n\x1b[33m[Disconnected]\x1b[0m');
+  }
+  document.getElementById('term-status').textContent = 'Disconnected';
+  document.getElementById('term-connect-btn').style.display = '';
+  document.getElementById('term-disconnect-btn').style.display = 'none';
+}
+
+function _termSetFontSize(size) {
+  localStorage.setItem('amux_term_fontsize', size);
+  if (_term) {
+    _term.options.fontSize = parseInt(size);
+    if (_termFit) _termFit.fit();
+  }
+}
+
+// Refit terminal on window resize
+window.addEventListener('resize', () => {
+  if (_term && _termFit && activeView === 'terminal') {
+    _termFit.fit();
+  }
+});
+
 // ── Notes tab ─────────────────────────────────────────────────────────────────
 let _notesActive = null; // { path, title }
 let _notesTrashOpen = false;
@@ -21368,6 +21725,9 @@ async function _gmailSubmitCode(account) {
 <script src="https://cdn.jsdelivr.net/npm/quilljs-markdown@latest/dist/quilljs-markdown.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gridstack@7/dist/gridstack-all.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <div id="grid-view">
   <div class="grid-toolbar">
@@ -24500,6 +24860,75 @@ p{{color:#888;margin:12px 0 28px;font-size:0.9rem;line-height:1.5}}
                 return self._json([dict(r) for r in rows])
 
             return self._json({"error": "not found"}, 404)
+
+        # ── Terminal / PTY (/api/terminal/*) ──────────────────────────────────
+        if path.startswith("/api/terminal"):
+
+            # POST /api/terminal/create  {"host":"user@host","cols":120,"rows":40}
+            if method == "POST" and path == "/api/terminal/create":
+                body = self._read_body()
+                host = body.get("host", "")
+                cols = int(body.get("cols", 120))
+                rows = int(body.get("rows", 40))
+                try:
+                    result = _term_create(host=host, cols=cols, rows=rows)
+                    return self._json(result, 201)
+                except Exception as e:
+                    return self._json({"error": str(e)}, 500)
+
+            # POST /api/terminal/<id>/input  {"data":"base64-encoded-input"}
+            m_term = re.match(r"^/api/terminal/([^/]+)/input$", path)
+            if method == "POST" and m_term:
+                tid = m_term.group(1)
+                body = self._read_body()
+                raw = body.get("data", "")
+                try:
+                    data = base64.b64decode(raw)
+                except Exception:
+                    data = raw.encode("utf-8", errors="replace")
+                _term_write(tid, data)
+                return self._json({"ok": True})
+
+            # GET /api/terminal/<id>/output
+            m_term = re.match(r"^/api/terminal/([^/]+)/output$", path)
+            if method == "GET" and m_term:
+                tid = m_term.group(1)
+                data = _term_read(tid)
+                alive = _term_alive(tid)
+                return self._json({
+                    "data": base64.b64encode(data).decode() if data else "",
+                    "alive": alive,
+                })
+
+            # POST /api/terminal/<id>/resize  {"cols":120,"rows":40}
+            m_term = re.match(r"^/api/terminal/([^/]+)/resize$", path)
+            if method == "POST" and m_term:
+                tid = m_term.group(1)
+                body = self._read_body()
+                _term_resize(tid, int(body.get("cols", 120)), int(body.get("rows", 40)))
+                return self._json({"ok": True})
+
+            # DELETE /api/terminal/<id>
+            m_term = re.match(r"^/api/terminal/([^/]+)$", path)
+            if method == "DELETE" and m_term:
+                tid = m_term.group(1)
+                _term_destroy(tid)
+                return self._json({"ok": True})
+
+            # GET /api/terminal/sessions
+            if method == "GET" and path == "/api/terminal/sessions":
+                with _term_lock:
+                    sessions = []
+                    for tid, t in _terminals.items():
+                        sessions.append({
+                            "id": tid, "host": t["host"],
+                            "created": t["created"],
+                            "cols": t["cols"], "rows": t["rows"],
+                            "alive": _term_alive(tid),
+                        })
+                return self._json(sessions)
+
+            return self._json({"error": "terminal route not found"}, 404)
 
         # ── Browser automation (/api/browser/*) — powered by browser-use CLI ──
         if path.startswith("/api/browser"):
