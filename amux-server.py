@@ -7311,6 +7311,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .notes-preview li[data-list="checked"] > *:last-child { text-decoration: line-through; color: var(--dim); }
   .notes-preview p { margin: 0 0 10px; }
   .notes-preview p:last-child { margin-bottom: 0; }
+  .notes-preview mark.search-hit { background: rgba(250,204,21,0.35); border-radius: 2px; padding: 0 1px; }
+  .notes-preview mark.search-hit.current { background: rgba(250,204,21,0.7); outline: 2px solid rgba(250,204,21,0.9); }
   /* Mobile notes improvements */
   @media (max-width: 600px) {
     #notes-view { height: calc(100dvh - 122px); }
@@ -8206,6 +8208,13 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="notes-mode-tabs" id="notes-mode-tabs" style="display:none;">
       <button class="notes-mode-tab active" id="notes-tab-edit" onclick="_notesSwitchMode('edit')">Edit</button>
       <button class="notes-mode-tab" id="notes-tab-preview" onclick="_notesSwitchMode('preview')">Preview</button>
+      <div id="notes-preview-search" style="display:none;margin-left:auto;display:none;align-items:center;gap:4px;">
+        <input id="notes-preview-search-input" type="text" placeholder="Search in preview..." oninput="_notesPreviewSearch(this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();event.shiftKey?_notesPreviewSearchNav(-1):_notesPreviewSearchNav(1);}" style="font-size:0.75rem;padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);width:160px;outline:none;">
+        <span id="notes-preview-search-count" style="font-size:0.68rem;color:var(--dim);min-width:36px;text-align:center;"></span>
+        <button onclick="_notesPreviewSearchNav(-1)" style="background:none;border:1px solid var(--border);border-radius:3px;padding:1px 5px;cursor:pointer;color:var(--fg);font-size:0.7rem;" title="Previous (Shift+Enter)">&#x25B2;</button>
+        <button onclick="_notesPreviewSearchNav(1)" style="background:none;border:1px solid var(--border);border-radius:3px;padding:1px 5px;cursor:pointer;color:var(--fg);font-size:0.7rem;" title="Next (Enter)">&#x25BC;</button>
+        <button onclick="_notesPreviewSearchClear()" style="background:none;border:none;cursor:pointer;color:var(--dim);font-size:0.85rem;padding:0 2px;" title="Close">&times;</button>
+      </div>
     </div>
     <div class="notes-quill-wrap" id="notes-quill-wrap" style="display:none;">
       <div id="notes-quill"></div>
@@ -20506,14 +20515,13 @@ function _notesSwitchMode(mode) {
   document.getElementById('notes-tab-preview').classList.toggle('active', mode === 'preview');
   const quillWrap = document.getElementById('notes-quill-wrap');
   const preview = document.getElementById('notes-preview');
+  const searchBar = document.getElementById('notes-preview-search');
   if (mode === 'preview') {
     if (_quill) {
       const rawIsHtml = /<[a-z][\s\S]*>/i.test(_notesRawContent);
       if (rawIsHtml) {
-        // Quill-authored HTML — render directly
         preview.innerHTML = _quill.root.innerHTML;
       } else {
-        // Plain markdown — render with marked
         preview.innerHTML = renderMarkdown(_notesRawContent) || '<span style="color:var(--dim);font-size:0.85rem;">Empty note</span>';
       }
       preview.classList.add('md-content');
@@ -20521,10 +20529,111 @@ function _notesSwitchMode(mode) {
     }
     preview.classList.add('active');
     quillWrap.style.display = 'none';
+    _previewSearchOrigHTML = preview.innerHTML;  // capture for search restore
+    if (searchBar) searchBar.style.display = 'flex';
   } else {
+    _notesPreviewSearchClear();
     preview.classList.remove('active');
     quillWrap.style.display = 'flex';
+    if (searchBar) searchBar.style.display = 'none';
   }
+}
+
+// ── Preview search (find-in-page for rendered notes) ──
+let _previewSearchHits = [];
+let _previewSearchIdx = -1;
+let _previewSearchOrigHTML = '';
+
+function _notesPreviewSearch(query) {
+  const preview = document.getElementById('notes-preview');
+  if (!preview) return;
+  // Restore original HTML before each search to avoid compounding marks
+  if (_previewSearchOrigHTML) preview.innerHTML = _previewSearchOrigHTML;
+  else _previewSearchOrigHTML = preview.innerHTML;
+  _previewSearchHits = [];
+  _previewSearchIdx = -1;
+  const countEl = document.getElementById('notes-preview-search-count');
+  if (!query || query.length < 2) {
+    if (countEl) countEl.textContent = '';
+    return;
+  }
+  // Walk text nodes and wrap matches in <mark>
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp('(' + escaped + ')', 'gi');
+  _highlightTextNodes(preview, regex);
+  _previewSearchHits = Array.from(preview.querySelectorAll('mark.search-hit'));
+  if (countEl) countEl.textContent = _previewSearchHits.length ? '0/' + _previewSearchHits.length : 'no results';
+  if (_previewSearchHits.length) _notesPreviewSearchNav(1);
+}
+
+function _highlightTextNodes(root, regex) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => {
+      if (n.parentElement && (n.parentElement.tagName === 'SCRIPT' || n.parentElement.tagName === 'STYLE' || n.parentElement.tagName === 'MARK')) return NodeFilter.FILTER_REJECT;
+      return regex.test(n.textContent) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+    }
+  });
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(node => {
+    regex.lastIndex = 0;
+    const frag = document.createDocumentFragment();
+    let last = 0, m;
+    while ((m = regex.exec(node.textContent)) !== null) {
+      if (m.index > last) frag.appendChild(document.createTextNode(node.textContent.slice(last, m.index)));
+      const mark = document.createElement('mark');
+      mark.className = 'search-hit';
+      mark.textContent = m[1];
+      frag.appendChild(mark);
+      last = regex.lastIndex;
+    }
+    if (last < node.textContent.length) frag.appendChild(document.createTextNode(node.textContent.slice(last)));
+    node.parentNode.replaceChild(frag, node);
+  });
+}
+
+function _notesPreviewSearchNav(dir) {
+  if (!_previewSearchHits.length) return;
+  if (_previewSearchIdx >= 0 && _previewSearchIdx < _previewSearchHits.length)
+    _previewSearchHits[_previewSearchIdx].classList.remove('current');
+  _previewSearchIdx = (_previewSearchIdx + dir + _previewSearchHits.length) % _previewSearchHits.length;
+  const hit = _previewSearchHits[_previewSearchIdx];
+  hit.classList.add('current');
+  hit.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const countEl = document.getElementById('notes-preview-search-count');
+  if (countEl) countEl.textContent = (_previewSearchIdx + 1) + '/' + _previewSearchHits.length;
+}
+
+// Cmd/Ctrl+F in preview mode focuses the search input
+document.addEventListener('keydown', function(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'f' && _notesMode === 'preview') {
+    const input = document.getElementById('notes-preview-search-input');
+    if (input && input.offsetParent !== null) {
+      e.preventDefault();
+      input.focus();
+      input.select();
+    }
+  }
+  // Escape closes preview search
+  if (e.key === 'Escape' && _notesMode === 'preview') {
+    const input = document.getElementById('notes-preview-search-input');
+    if (input && input.value) { _notesPreviewSearchClear(); e.preventDefault(); }
+  }
+});
+
+function _notesPreviewSearchClear() {
+  const preview = document.getElementById('notes-preview');
+  if (preview && _previewSearchOrigHTML) {
+    preview.innerHTML = _previewSearchOrigHTML;
+    _notesPreviewBindCheckboxes(preview);
+  }
+  _previewSearchOrigHTML = '';
+  _previewSearchHits = [];
+  _previewSearchIdx = -1;
+  const input = document.getElementById('notes-preview-search-input');
+  if (input) input.value = '';
+  const countEl = document.getElementById('notes-preview-search-count');
+  if (countEl) countEl.textContent = '';
 }
 
 function _notesToggleSidebar() {
