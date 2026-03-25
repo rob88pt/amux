@@ -76,6 +76,66 @@ def _safe_note_path(note_rel: str, base: Path = None) -> Path | None:
         return None  # traversal detected
     return candidate
 
+# ── Filesystem access control ────────────────────────────────────────────────
+_SENSITIVE_PATHS = {".ssh", ".gnupg", ".aws", ".kube", ".netrc", ".npmrc",
+                    ".docker", ".config/gcloud", ".config/gh"}
+_BLOCKED_SYSTEM_PATHS = frozenset({
+    "/etc/shadow", "/etc/sudoers", "/etc/master.passwd",
+    "/private/etc/shadow", "/private/etc/sudoers",
+    "/var/db/sudo", "/private/var/db/sudo",
+})
+_BLOCKED_SYSTEM_PREFIXES = (
+    "/etc/ssh/", "/private/etc/ssh/",
+    "/var/run/secrets/", "/run/secrets/",
+)
+
+def _is_path_allowed(p: Path) -> bool:
+    """Check if a resolved path is safe to access via file APIs."""
+    try:
+        resolved = p.resolve()
+    except (OSError, ValueError):
+        return False
+    resolved_str = str(resolved)
+    if resolved_str in _BLOCKED_SYSTEM_PATHS:
+        return False
+    if any(resolved_str.startswith(pfx) for pfx in _BLOCKED_SYSTEM_PREFIXES):
+        return False
+    home = Path.home().resolve()
+    try:
+        rel = resolved.relative_to(home)
+        parts = rel.parts
+        for sensitive in _SENSITIVE_PATHS:
+            sens_parts = Path(sensitive).parts
+            if parts[:len(sens_parts)] == sens_parts:
+                return False
+    except ValueError:
+        pass
+    return True
+
+# ── Authentication ───────────────────────────────────────────────────────────
+_AUTH_TOKEN_FILE = _amux_home / "auth_token"
+def _load_or_create_auth_token() -> str:
+    env_token = os.environ.get("AMUX_AUTH_TOKEN", "")
+    if env_token:
+        return "" if env_token.lower() == "none" else env_token
+    if _AUTH_TOKEN_FILE.exists():
+        token = _AUTH_TOKEN_FILE.read_text().strip()
+        if token:
+            return token
+    import secrets as _secrets
+    token = _secrets.token_urlsafe(32)
+    _amux_home.mkdir(parents=True, exist_ok=True)
+    _AUTH_TOKEN_FILE.write_text(token + "\n")
+    os.chmod(str(_AUTH_TOKEN_FILE), 0o600)
+    return token
+
+AUTH_TOKEN = _load_or_create_auth_token()
+
+_PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
+                           "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
+                           "/api/release-notes"})
+_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/")
+
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
 CC_BOARD_DIR.mkdir(parents=True, exist_ok=True)
@@ -9844,6 +9904,30 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// ── Auth token injection ──
+const _authToken = window._AMUX_AUTH_TOKEN || '';
+function _authHeaders(headers) {
+  const h = headers ? { ...headers } : {};
+  if (_authToken) h['Authorization'] = 'Bearer ' + _authToken;
+  return h;
+}
+function _authUrl(url) {
+  if (!_authToken) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + '_token=' + encodeURIComponent(_authToken);
+}
+if (_authToken) {
+  const _origFetchForAuth = window.fetch;
+  window.fetch = function(input, init) {
+    const url = typeof input === 'string' ? input : (input instanceof Request ? input.url : '');
+    if (url.startsWith('/') || url.startsWith(location.origin)) {
+      init = init || {};
+      init.headers = _authHeaders(init.headers instanceof Headers ? Object.fromEntries(init.headers) : init.headers);
+    }
+    return _origFetchForAuth.call(this, input, init);
+  };
+}
+
 // apiCall — wraps mutation fetches; queues when offline or server unreachable
 async function apiCall(url, options) {
   if (!online) {
@@ -9851,6 +9935,8 @@ async function apiCall(url, options) {
     return null;
   }
   try {
+    options = options || {};
+    options.headers = _authHeaders(options.headers);
     const r = await fetch(url, options);
     if (!r.ok) {
       showToast('Error: ' + r.status);
@@ -18172,7 +18258,7 @@ let _pollTimer = null;
 
 function connectSSE() {
   if (_sseFallback || _sse) return;
-  _sse = new EventSource(API + '/api/events');
+  _sse = new EventSource(_authUrl(API + '/api/events'));
 
   _sse.onmessage = function(e) {
     const wasOffline = !_liveSSE;
@@ -22350,9 +22436,19 @@ class CCHandler(BaseHTTPRequestHandler):
         super().send_response(code, message)
 
     def _cors(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        origin = self.headers.get("Origin", "")
+        if origin:
+            from urllib.parse import urlparse as _up
+            parsed = _up(origin)
+            host = parsed.hostname or ""
+            allowed = host in ("localhost", "127.0.0.1", "0.0.0.0") or \
+                      host == get_lan_ip() or \
+                      host.endswith(".ts.net")
+            if allowed:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Private-Network", "true")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "SAMEORIGIN")
@@ -22541,7 +22637,7 @@ class CCHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
         self.send_header("X-Accel-Buffering", "no")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._cors()
         self.end_headers()
 
         # Cap SSE connection lifetime to avoid thread accumulation.
@@ -22700,14 +22796,39 @@ class CCHandler(BaseHTTPRequestHandler):
                     _req_tl.event = None
                 _emit_event(etype, action, target, session, detail, self._resp_status, ip)
 
+    def _check_auth(self, method: str, path: str) -> bool:
+        """Return True if request is authorized. Sends 401 and returns False if not."""
+        if not AUTH_TOKEN:
+            return True
+        if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+            return True
+        if method == "GET" and not path.startswith("/api/") and not path.startswith("/proxy/"):
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth == f"Bearer {AUTH_TOKEN}":
+            return True
+        token_qs = parse_qs(urlparse(self.path).query).get("_token", [""])[0]
+        if token_qs == AUTH_TOKEN:
+            return True
+        self.send_response(401)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"error": "unauthorized"}).encode())
+        return False
+
     def _route_inner(self, method: str, path: str, qs: dict):
+
+        # ── Auth gate ──
+        if not self._check_auth(method, path):
+            return
 
         # GET /
         if method == "GET" and path == "/":
             import json as _json
             page = DASHBOARD_HTML.replace(
                 "</head>",
-                f'<script>window._AMUX_S3_ICAL_URL={_json.dumps(_S3_CAL_URL)};</script></head>',
+                f'<script>window._AMUX_S3_ICAL_URL={_json.dumps(_S3_CAL_URL)};'
+                f'window._AMUX_AUTH_TOKEN={_json.dumps(AUTH_TOKEN)};</script></head>',
                 1,
             )
             return self._html(page)
@@ -23649,6 +23770,8 @@ class CCHandler(BaseHTTPRequestHandler):
             if not srt_p:
                 return self._json({"error": "missing path"}, 400)
             srt_file = Path(srt_p).expanduser()
+            if not _is_path_allowed(srt_file):
+                return self._json({"error": "access denied"}, 403)
             if not srt_file.is_file():
                 return self._json({"error": "not found"}, 404)
             srt_text = srt_file.read_text(encoding="utf-8", errors="replace")
@@ -23671,6 +23794,8 @@ class CCHandler(BaseHTTPRequestHandler):
             p = Path(fpath).expanduser()
             if not p.is_absolute():
                 return self._json({"error": "absolute path required"}, 400)
+            if not _is_path_allowed(p):
+                return self._json({"error": "access denied"}, 403)
             WRITABLE_EXTS = {".md", ".markdown", ".mdx", ".txt", ".json",
                              ".yml", ".yaml", ".toml", ".ini", ".cfg",
                              ".sh", ".py", ".js", ".ts", ".css", ".html", ".htm"}
@@ -23693,6 +23818,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 p = Path(cwd).expanduser() / p
             elif not p.is_absolute():
                 return self._json({"error": "relative path without cwd"}, 400)
+            if not _is_path_allowed(p):
+                return self._json({"error": "access denied"}, 403)
             if not p.is_file():
                 return self._json({"error": "file not found"}, 404)
             try:
@@ -23770,6 +23897,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 p = Path(cwd).expanduser() / p
             elif not p.is_absolute():
                 return self._json({"error": "relative path without cwd"}, 400)
+            if not _is_path_allowed(p):
+                return self._json({"error": "access denied"}, 403)
             if not p.is_file():
                 return self._json({"error": "file not found"}, 404)
             ext = p.suffix.lower()
@@ -23819,6 +23948,8 @@ class CCHandler(BaseHTTPRequestHandler):
             if not query:
                 return self._json([])
             p = Path(query).expanduser()
+            if not _is_path_allowed(p):
+                return self._json([])
             # If query ends with /, list contents of that dir
             if query.endswith("/") and p.is_dir():
                 parent = p
@@ -23832,6 +23963,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 results = []
                 for item in sorted(parent.iterdir()):
                     if item.name.startswith("."):
+                        continue
+                    if not _is_path_allowed(item):
                         continue
                     if item.is_dir() and item.name.lower().startswith(prefix):
                         results.append(str(item) + "/")
@@ -23868,6 +24001,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 return self._json({"error": "missing path"}, 400)
             show_hidden = qs.get("hidden", ["0"])[0] == "1"
             p = Path(ls_path).expanduser().resolve()
+            if not _is_path_allowed(p):
+                return self._json({"error": "access denied"}, 403)
             if not p.is_dir():
                 return self._json({"error": "not a directory"}, 400)
             try:
@@ -23915,6 +24050,8 @@ class CCHandler(BaseHTTPRequestHandler):
             if not target_dir:
                 return self._json({"error": "missing 'dir' field"}, 400)
             dest_dir = Path(target_dir).expanduser().resolve()
+            if not _is_path_allowed(dest_dir):
+                return self._json({"error": "access denied"}, 403)
             if not dest_dir.is_dir():
                 return self._json({"error": f"not a directory: {target_dir}"}, 400)
             saved = []
@@ -26585,6 +26722,10 @@ def main():
             print(f"\033[32m  ✓ HTTPS enabled — service worker & offline mode will work\033[0m")
     else:
         print(f"\033[33m  ⚠ HTTP only — offline mode requires HTTPS on non-localhost\033[0m")
+    if AUTH_TOKEN:
+        print(f"\033[32m  ✓ Auth enabled — token in {_AUTH_TOKEN_FILE}\033[0m")
+    else:
+        print(f"\033[33m  ⚠ Auth DISABLED — all endpoints are public\033[0m")
     print(f"\033[2m  Auto-reload active — editing amux-server.py will restart\033[0m")
     print(f"\n\033[2mPress Ctrl-C to stop\033[0m")
 
