@@ -1,5 +1,8 @@
 import SwiftUI
 import WebKit
+import os.log
+
+private let logger = Logger(subsystem: "io.amux.app", category: "WebView")
 
 struct WebView: UIViewRepresentable {
     let url: URL
@@ -33,7 +36,31 @@ struct WebView: UIViewRepresentable {
         context.coordinator.refreshControl = refresh
         context.coordinator.webView = webView
 
+        // Capture JS console.log/error/warn into os_log
+        let script = WKUserScript(source: """
+            (function() {
+                const _log = console.log, _warn = console.warn, _err = console.error;
+                function post(level, args) {
+                    window.webkit.messageHandlers.consoleLog.postMessage(
+                        { level: level, message: Array.from(args).map(String).join(' ') }
+                    );
+                }
+                console.log = function() { post('log', arguments); _log.apply(console, arguments); };
+                console.warn = function() { post('warn', arguments); _warn.apply(console, arguments); };
+                console.error = function() { post('error', arguments); _err.apply(console, arguments); };
+                window.addEventListener('error', function(e) {
+                    post('error', ['Uncaught: ' + e.message + ' at ' + e.filename + ':' + e.lineno]);
+                });
+                window.addEventListener('unhandledrejection', function(e) {
+                    post('error', ['Unhandled rejection: ' + (e.reason || e)]);
+                });
+            })();
+            """, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        config.userContentController.add(context.coordinator, name: "consoleLog")
+        config.userContentController.addUserScript(script)
+
         webView.load(URLRequest(url: url))
+        logger.info("Loading URL: \(url.absoluteString)")
         return webView
     }
 
@@ -45,13 +72,24 @@ struct WebView: UIViewRepresentable {
     }
 
     // MARK: - Coordinator
-    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
+    class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         var parent: WebView
         weak var webView: WKWebView?
         var refreshControl: UIRefreshControl?
 
         init(_ parent: WebView) {
             self.parent = parent
+        }
+
+        // JS console → os_log bridge
+        func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+            guard let body = message.body as? [String: String],
+                  let level = body["level"], let msg = body["message"] else { return }
+            switch level {
+            case "error": logger.error("[js] \(msg)")
+            case "warn":  logger.warning("[js] \(msg)")
+            default:      logger.debug("[js] \(msg)")
+            }
         }
 
         // Accept self-signed certs (Tailscale local installs)
@@ -90,6 +128,7 @@ struct WebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             parent.isLoading = true
+            logger.debug("Navigation started: \(webView.url?.absoluteString ?? "nil")")
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -97,11 +136,28 @@ struct WebView: UIViewRepresentable {
             parent.canGoBack = webView.canGoBack
             parent.canGoForward = webView.canGoForward
             refreshControl?.endRefreshing()
+            logger.info("Navigation finished: \(webView.url?.absoluteString ?? "nil")")
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             parent.isLoading = false
             refreshControl?.endRefreshing()
+            logger.error("Navigation failed: \(error.localizedDescription)")
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            parent.isLoading = false
+            refreshControl?.endRefreshing()
+            logger.error("Provisional navigation failed: \(error.localizedDescription) url=\(webView.url?.absoluteString ?? "nil")")
+        }
+
+        func webView(_ webView: WKWebView, didReceiveServerRedirectForProvisionalNavigation navigation: WKNavigation!) {
+            logger.debug("Server redirect → \(webView.url?.absoluteString ?? "nil")")
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            logger.fault("WebContent process terminated — reloading")
+            webView.reload()
         }
 
         @objc func handleRefresh(_ sender: UIRefreshControl) {

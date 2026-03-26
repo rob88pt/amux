@@ -88,6 +88,7 @@ struct SettingsView: View {
             addSection
             resetSection
         }
+        .onAppear { serverManager.checkAllServers() }
     }
 
     private var serversSection: some View {
@@ -100,14 +101,33 @@ struct SettingsView: View {
     }
 
     private func serverRow(_ server: SavedServer) -> some View {
-        HStack {
-            VStack(alignment: .leading) {
+        HStack(spacing: 12) {
+            Image(systemName: server.serverType.icon)
+                .foregroundColor(.secondary)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
                 Text(server.name).font(.headline)
-                Text(server.url).font(.caption).foregroundColor(.secondary)
+                HStack(spacing: 6) {
+                    Text(server.serverType.label)
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.15))
+                        .clipShape(Capsule())
+                    if let status = serverManager.serverStatus[server.url] {
+                        Circle()
+                            .fill(status == .online ? Color.green : Color.red)
+                            .frame(width: 6, height: 6)
+                    }
+                    Text(server.url.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: ""))
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
             }
             Spacer()
             if serverManager.serverURL?.absoluteString == server.url {
-                Image(systemName: "checkmark").foregroundColor(.accentColor)
+                Image(systemName: "checkmark.circle.fill").foregroundColor(.accentColor)
             }
         }
         .contentShape(Rectangle())
