@@ -133,8 +133,8 @@ AUTH_TOKEN = _load_or_create_auth_token()
 
 _PUBLIC_PATHS = frozenset({"/", "/manifest.json", "/sw.js", "/icon.svg", "/icon.png",
                            "/icon-192.png", "/icon-512.png", "/ca", "/release-notes",
-                           "/api/release-notes"})
-_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/")
+                           "/api/release-notes", "/api/calendar.ics"})
+_PUBLIC_PREFIXES = ("/s/", "/api/share/", "/invite/", "/proxy/", "/api/branding/")
 
 CC_LOGS.mkdir(parents=True, exist_ok=True)
 CC_MEMORY.mkdir(parents=True, exist_ok=True)
@@ -22799,6 +22799,10 @@ class CCHandler(BaseHTTPRequestHandler):
     def _check_auth(self, method: str, path: str) -> bool:
         """Return True if request is authorized. Sends 401 and returns False if not."""
         if not AUTH_TOKEN:
+            return True
+        # Localhost always bypasses auth (local sessions, CLI tools)
+        ip = self.client_address[0] if self.client_address else ""
+        if ip in ("127.0.0.1", "::1"):
             return True
         if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
             return True
