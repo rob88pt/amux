@@ -13004,7 +13004,16 @@ function openChipPicker() {
   let html = '<div class="chip-picker-overlay" onclick="if(event.target===this)closeChipPicker()">'
     + '<div class="chip-picker">'
     + '<div class="chip-picker-header"><input id="chip-picker-search" placeholder="Search commands..." oninput="filterChipPicker()"></div>'
-    + '<div class="chip-picker-body" id="chip-picker-body">';
+    + '<div class="chip-picker-body" id="chip-picker-body">'
+    + '<div class="chip-picker-section">Custom</div>'
+    + '<div class="chip-picker-item" data-search="create custom new" onclick="openCustomChipForm()" style="color:var(--accent);font-weight:600;">'
+    + '<span>+ Create custom button</span><span class="cpd">Your own label + prompt</span></div>';
+  // Show user's existing custom chips for reference
+  existing.filter(c => c.id.startsWith('custom-')).forEach(c => {
+    html += '<div class="chip-picker-item added" data-search="' + esc((c.label + ' ' + c.value).toLowerCase()) + '">'
+      + '<span>' + esc(c.label) + '</span><span class="cpd">' + esc(c.value.length > 40 ? c.value.slice(0,40) + '...' : c.value) + '</span>'
+      + '<span style="color:var(--dim);font-size:0.75rem;">\u2713</span></div>';
+  });
   ALL_CHIPS.forEach(sec => {
     html += '<div class="chip-picker-section">' + esc(sec.section) + '</div>';
     sec.items.forEach(item => {
@@ -13024,6 +13033,39 @@ function openChipPicker() {
   div.innerHTML = html;
   document.body.appendChild(div);
   setTimeout(() => document.getElementById('chip-picker-search')?.focus(), 50);
+}
+
+function openCustomChipForm() {
+  const body = document.getElementById('chip-picker-body');
+  if (!body) return;
+  body.innerHTML = '<div style="padding:16px;display:flex;flex-direction:column;gap:12px;">'
+    + '<div style="font-size:0.85rem;font-weight:600;color:var(--text);">Create Custom Button</div>'
+    + '<input id="custom-chip-label" placeholder="Button label (e.g. Summarize)" '
+    + 'style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:0.85rem;outline:none;">'
+    + '<textarea id="custom-chip-prompt" placeholder="Prompt to send (e.g. Summarize the current task and output in bullet points)" '
+    + 'rows="4" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text);font-size:0.85rem;outline:none;resize:vertical;font-family:inherit;"></textarea>'
+    + '<div style="display:flex;gap:8px;justify-content:flex-end;">'
+    + '<button onclick="closeChipPicker()" style="padding:6px 14px;border-radius:6px;border:1px solid var(--border);background:var(--card);color:var(--text);cursor:pointer;font-size:0.85rem;">Cancel</button>'
+    + '<button onclick="saveCustomChip()" style="padding:6px 14px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:0.85rem;font-weight:600;">Add</button>'
+    + '</div></div>';
+  setTimeout(() => document.getElementById('custom-chip-label')?.focus(), 50);
+  // Hide search bar while in form view
+  const header = document.querySelector('.chip-picker-header');
+  if (header) header.style.display = 'none';
+}
+
+function saveCustomChip() {
+  const label = (document.getElementById('custom-chip-label')?.value || '').trim();
+  const prompt = (document.getElementById('custom-chip-prompt')?.value || '').trim();
+  if (!label || !prompt) {
+    const inp = !label ? document.getElementById('custom-chip-label') : document.getElementById('custom-chip-prompt');
+    if (inp) { inp.style.borderColor = 'var(--red)'; inp.focus(); }
+    return;
+  }
+  const id = 'custom-' + Date.now();
+  addChip({ id, label, action: 'send', value: prompt, danger: false });
+  closeChipPicker();
+  showToast('Added "' + label + '" button');
 }
 
 function closeChipPicker() {
