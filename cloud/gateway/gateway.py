@@ -264,7 +264,7 @@ _LOGIN_HTML = """<!DOCTYPE html>
     })();
 
     function mountSignIn() {
-      window.Clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'hash' });
+      window.Clerk.mountSignIn(document.getElementById('clerk-root'), { routing: 'path', path: '/sign-in' });
       window.Clerk.addListener(({ user }) => {
         if (user && !exchanging) exchangeAndRedirect();
       });
@@ -1190,6 +1190,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
                 self.end_headers()
             return
+
+        # ── Public: Clerk path-based routing (sign-in/sign-up sub-pages) ──
+        if path.startswith("/sign-in") or path.startswith("/sign-up"):
+            return self._serve_login(post_login_redirect="/")
 
         # ── Public: shared session links — /s/<token> and /api/share/<token>/* ──
         if path.startswith("/s/") or path.startswith("/api/share/"):
