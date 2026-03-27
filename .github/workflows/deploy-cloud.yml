@@ -62,6 +62,6 @@ jobs:
                    s/\${R2_ACCESS_KEY}/${R2_ACCESS_KEY}/g;
                    s/\${R2_SECRET_KEY}/${R2_SECRET_KEY}/g" \
                 "$TEMPLATE" > "$compose_file"
-              cd "$user_dir" && docker compose up -d 2>&1 | grep -v "^#" | tail -3
+              cd "$user_dir" && docker compose up -d --no-recreate 2>&1 | grep -v "^#" | tail -3
             done
           ENDSSH
