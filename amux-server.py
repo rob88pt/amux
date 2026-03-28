@@ -7424,6 +7424,9 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     border-color: var(--border); flex: 1; overflow-y: auto; background: var(--bg);
   }
   .notes-quill-wrap .ql-editor { color: var(--text); font-size: 0.88rem; line-height: 1.7; min-height: 200px; }
+  .notes-quill-wrap .ql-editor hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+  .notes-quill-wrap .ql-snow .ql-toolbar .ql-divider { width: 28px; font-size: 0.75rem; color: var(--dim); font-weight: 600; }
+  .notes-quill-wrap .ql-snow .ql-toolbar .ql-divider::after { content: '—'; }
   .notes-quill-wrap .ql-editor.ql-blank::before { color: var(--dim); font-style: normal; }
   .notes-quill-wrap .ql-snow .ql-stroke { stroke: var(--dim); }
   .notes-quill-wrap .ql-snow .ql-fill { fill: var(--dim); }
@@ -21512,19 +21515,46 @@ function _notesApplySidebarState() {
   }
 }
 
+// Register divider (horizontal rule) blot for Quill
+(function() {
+  const BlockEmbed = Quill.import('blots/block/embed');
+  class DividerBlot extends BlockEmbed {
+    static create() {
+      const node = super.create();
+      return node;
+    }
+    static value() { return true; }
+  }
+  DividerBlot.blotName = 'divider';
+  DividerBlot.tagName = 'hr';
+  Quill.register(DividerBlot);
+})();
+
 function _notesInitQuill() {
   if (_quill) return;
   _quill = new Quill('#notes-quill', {
     theme: 'snow',
     modules: {
-      toolbar: [
-        [{ header: [1, 2, 3, false] }],
-        ['bold', 'italic', 'underline', 'strike'],
-        ['blockquote', 'code-block'],
-        [{ list: 'ordered' }, { list: 'bullet' }, { list: 'check' }],
-        ['link'],
-        ['clean']
-      ]
+      toolbar: {
+        container: [
+          [{ header: [1, 2, 3, false] }],
+          ['bold', 'italic', 'underline', 'strike'],
+          ['blockquote', 'code-block'],
+          [{ list: 'ordered' }, { list: 'bullet' }, { list: 'check' }],
+          ['link'],
+          ['divider'],
+          ['clean']
+        ],
+        handlers: {
+          divider: function() {
+            const range = _quill.getSelection(true);
+            _quill.insertText(range.index, '\n', 'user');
+            _quill.insertEmbed(range.index + 1, 'divider', true, 'user');
+            _quill.insertText(range.index + 2, '\n', 'user');
+            _quill.setSelection(range.index + 3, 0, 'silent');
+          }
+        }
+      }
     },
     placeholder: 'Write your note…'
   });
