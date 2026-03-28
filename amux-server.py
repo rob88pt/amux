@@ -6290,6 +6290,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .peek-highlight { background: rgba(210,153,34,0.35); color: #fff; border-radius: 2px; }
   .peek-highlight.current { background: rgba(210,153,34,0.85); color: #000; }
 
+  /* Peek focus mode — collapse everything above terminal on mobile */
+  #peek-overlay.peek-focus .overlay-header,
+  #peek-overlay.peek-focus .peek-tabs,
+  #peek-overlay.peek-focus .peek-dir-bar { display: none !important; }
+  #peek-overlay.peek-focus .peek-focus-bar {
+    display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .peek-focus-bar { display: none; }
+  .peek-focus-bar h3 { margin: 0; font-size: 0.85rem; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
   /* Peek compact mode — when visual viewport is constrained (pinch zoom / keyboard) */
   .overlay.vv-compact .peek-cmd-row .chips { display: none !important; }
   .overlay.vv-compact .peek-dir-bar { display: none; }
@@ -9154,8 +9165,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <button class="search-clear" onclick="event.stopPropagation();clearPeekSearch()">&#x2715;</button>
       </div>
       <button class="btn" id="peek-explore-btn" onclick="openExplore(peekSessionDir,peekSession)" title="Browse files">&#x1F4C2;</button>
+      <button class="btn" onclick="togglePeekFocus()" id="peek-focus-btn" title="Focus mode — hide controls">&#x25B4;</button>
       <button class="btn" onclick="closePeek()">Close</button>
     </div>
+  </div>
+  <!-- Focus mode minimal bar (visible only in focus mode) -->
+  <div class="peek-focus-bar" id="peek-focus-bar">
+    <h3 id="peek-focus-title"></h3>
+    <button class="btn" onclick="togglePeekFocus()" title="Show controls">&#x25BE; Expand</button>
+    <button class="btn" onclick="closePeek()">Close</button>
   </div>
   <!-- Tab bar -->
   <div class="peek-tabs">
@@ -12221,7 +12239,12 @@ function openPeek(name, opts) {
   updatePeekStatus();
   document.getElementById('peek-body').innerHTML = '<span style="color:var(--dim)">Loading...</span>';
   updateConnectionStatus();
-  document.getElementById('peek-overlay').classList.add('active');
+  const peekOv = document.getElementById('peek-overlay');
+  peekOv.classList.add('active');
+  // Restore focus mode preference
+  const focusPref = localStorage.getItem('peekFocus') === '1';
+  peekOv.classList.toggle('peek-focus', focusPref);
+  document.getElementById('peek-focus-title').textContent = name;
   _syncPeekOverlayToVisualViewport();
   // Load cached peek instantly while fetching fresh data
   _idb.get('peek_' + name).then(cached => {
@@ -12264,7 +12287,7 @@ function closePeek() {
   lastPeekHTML = '';
   clearPeekFiles();
   const ov = document.getElementById('peek-overlay');
-  ov.classList.remove('active', 'vv-compact');
+  ov.classList.remove('active', 'vv-compact', 'peek-focus');
   ov.style.height = '';
   ov.style.top = '';
   if (peekTimer) { clearInterval(peekTimer); peekTimer = null; }
@@ -12509,6 +12532,13 @@ function peekSearchPrev() {
 
 // ── Peek command bar ──
 let peekCmdOpen = true;
+function togglePeekFocus() {
+  const ov = document.getElementById('peek-overlay');
+  const on = ov.classList.toggle('peek-focus');
+  document.getElementById('peek-focus-title').textContent = peekSession || '';
+  localStorage.setItem('peekFocus', on ? '1' : '');
+}
+
 function togglePeekCmd() {
   peekCmdOpen = !peekCmdOpen;
   const row = document.getElementById('peek-cmd-row');
