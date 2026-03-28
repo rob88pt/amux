@@ -9449,7 +9449,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="ab-title" id="ab-title">—</div>
     <div class="ab-time"><span id="ab-cur">0:00</span> / <span id="ab-dur">0:00</span></div>
   </div>
-  <div class="ab-progress"><input type="range" id="ab-seek" min="0" max="100" value="0" oninput="_abSeek(this.value)"></div>
+  <div class="ab-progress"><input type="range" id="ab-seek" min="0" max="100" value="0" step="0.1" oninput="_abSeekInput(this.value)" onmousedown="_abSeekStart()" onmouseup="_abSeekEnd()" ontouchstart="_abSeekStart()" ontouchend="_abSeekEnd()"></div>
   <button class="ab-speed" id="ab-speed" onclick="_abCycleSpeed()">1x</button>
   <button class="ab-btn" onclick="_abClose()" title="Close player">&times;</button>
 </div>
@@ -13151,61 +13151,86 @@ let _abCurrentFile = '';
 const _abAudio = document.getElementById('amux-audio');
 const _abSpeeds = [0.75, 1, 1.25, 1.5, 1.75, 2];
 let _abSpeedIdx = 1;
+let _abSeeking = false;  // true while user drags the seek thumb
+let _abLastSaveTime = 0; // throttle localStorage writes
+
+// Cache DOM refs once
+const _abEls = {
+  bar: document.getElementById('amux-audio-bar'),
+  title: document.getElementById('ab-title'),
+  cur: document.getElementById('ab-cur'),
+  dur: document.getElementById('ab-dur'),
+  seek: document.getElementById('ab-seek'),
+  playBtn: document.getElementById('ab-play-btn'),
+  speed: document.getElementById('ab-speed'),
+};
 
 function _abPlay(url, title) {
-  const bar = document.getElementById('amux-audio-bar');
   const audio = _abAudio;
   // If same file, just show bar and resume
   if (_abCurrentFile === url && audio.src) {
-    bar.classList.add('visible');
-    if (audio.paused) audio.play();
+    _abEls.bar.classList.add('visible');
+    if (audio.paused) audio.play().catch(() => {});
     return;
   }
   _abCurrentFile = url;
-  document.getElementById('ab-title').textContent = title || url.split('/').pop();
-  // Check for saved position
+  _abEls.title.textContent = title || decodeURIComponent(url.split('/').pop().split('?')[0]);
+  _abEls.playBtn.innerHTML = '&#x23F3;'; // hourglass while loading
   const saved = _abLoadPos(url);
+  audio.preload = 'auto';
   audio.src = _authUrl(url);
+  // Don't call audio.load() — setting src already triggers load
   audio.playbackRate = _abSpeeds[_abSpeedIdx];
-  audio.load();
-  audio.addEventListener('loadedmetadata', function onMeta() {
-    audio.removeEventListener('loadedmetadata', onMeta);
+  audio.addEventListener('canplay', function onReady() {
+    audio.removeEventListener('canplay', onReady);
     if (saved > 0 && saved < audio.duration - 1) audio.currentTime = saved;
-    audio.play();
+    audio.play().catch(() => {});
   });
-  bar.classList.add('visible');
+  audio.addEventListener('error', function onErr() {
+    audio.removeEventListener('error', onErr);
+    _abEls.playBtn.innerHTML = '&#x26A0;'; // warning icon
+    _abEls.cur.textContent = 'Error';
+  }, { once: true });
+  _abEls.bar.classList.add('visible');
   _abUpdateMediaSession(title);
 }
 
 function _abTogglePlay() {
   const audio = _abAudio;
   if (!audio.src) return;
-  if (audio.paused) { audio.play(); } else { audio.pause(); }
+  if (audio.paused) { audio.play().catch(() => {}); } else { audio.pause(); }
 }
 
 function _abClose() {
-  const audio = _abAudio;
   _abSavePos();
-  audio.pause();
-  document.getElementById('amux-audio-bar').classList.remove('visible');
+  _abAudio.pause();
+  _abEls.bar.classList.remove('visible');
 }
 
-function _abSeek(val) {
-  const audio = _abAudio;
-  if (audio.duration) audio.currentTime = (val / 100) * audio.duration;
+function _abSeekStart() { _abSeeking = true; }
+function _abSeekEnd() {
+  _abSeeking = false;
+  if (_abAudio.duration) _abAudio.currentTime = (_abEls.seek.value / 100) * _abAudio.duration;
+}
+function _abSeekInput(val) {
+  // Only update time display while dragging — don't actually seek until mouseup/touchend
+  if (_abAudio.duration) _abEls.cur.textContent = _abFmtTime((val / 100) * _abAudio.duration);
 }
 
 function _abCycleSpeed() {
   _abSpeedIdx = (_abSpeedIdx + 1) % _abSpeeds.length;
   const speed = _abSpeeds[_abSpeedIdx];
   _abAudio.playbackRate = speed;
-  document.getElementById('ab-speed').textContent = speed + 'x';
+  _abEls.speed.textContent = speed + 'x';
 }
 
 function _abFmtTime(s) {
   if (!s || !isFinite(s)) return '0:00';
-  const m = Math.floor(s / 60), sec = Math.floor(s % 60);
-  return m + ':' + (sec < 10 ? '0' : '') + sec;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+  const mm = (h ? (m < 10 ? '0' : '') : '') + m;
+  const ss = (sec < 10 ? '0' : '') + sec;
+  return h ? h + ':' + mm + ':' + ss : mm + ':' + ss;
 }
 
 function _abSavePos() {
@@ -13220,55 +13245,46 @@ function _abSavePos() {
 
 function _abLoadPos(url) {
   try {
-    const store = JSON.parse(localStorage.getItem('amux_audio_pos') || '{}');
-    return store[url] || 0;
+    return JSON.parse(localStorage.getItem('amux_audio_pos') || '{}')[url] || 0;
   } catch(e) { return 0; }
 }
 
 function _abUpdateMediaSession(title) {
-  if ('mediaSession' in navigator) {
-    navigator.mediaSession.metadata = new MediaMetadata({
-      title: title || 'Amux Audio',
-      artist: 'Amux',
-      album: '',
-    });
-    navigator.mediaSession.setActionHandler('play', () => _abAudio.play());
-    navigator.mediaSession.setActionHandler('pause', () => _abAudio.pause());
-    navigator.mediaSession.setActionHandler('seekbackward', () => { _abAudio.currentTime = Math.max(0, _abAudio.currentTime - 15); });
-    navigator.mediaSession.setActionHandler('seekforward', () => { _abAudio.currentTime = Math.min(_abAudio.duration, _abAudio.currentTime + 30); });
-    navigator.mediaSession.setActionHandler('seekto', (d) => { if (d.seekTime != null) _abAudio.currentTime = d.seekTime; });
-  }
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({ title: title || 'Amux Audio', artist: 'Amux' });
+  navigator.mediaSession.setActionHandler('play', () => _abAudio.play());
+  navigator.mediaSession.setActionHandler('pause', () => _abAudio.pause());
+  navigator.mediaSession.setActionHandler('seekbackward', () => { _abAudio.currentTime = Math.max(0, _abAudio.currentTime - 15); });
+  navigator.mediaSession.setActionHandler('seekforward', () => { _abAudio.currentTime = Math.min(_abAudio.duration || 0, _abAudio.currentTime + 30); });
+  navigator.mediaSession.setActionHandler('seekto', (d) => { if (d.seekTime != null) _abAudio.currentTime = d.seekTime; });
 }
 
-// Update UI during playback
+// Update UI during playback — throttled
 if (_abAudio) {
   _abAudio.addEventListener('timeupdate', () => {
-    document.getElementById('ab-cur').textContent = _abFmtTime(_abAudio.currentTime);
-    const seek = document.getElementById('ab-seek');
-    if (_abAudio.duration) seek.value = (_abAudio.currentTime / _abAudio.duration) * 100;
-    // Save position every 5 seconds
-    if (Math.floor(_abAudio.currentTime) % 5 === 0) _abSavePos();
+    if (_abSeeking) return; // don't fight the user's drag
+    const t = _abAudio.currentTime, d = _abAudio.duration;
+    _abEls.cur.textContent = _abFmtTime(t);
+    if (d) _abEls.seek.value = (t / d) * 100;
+    // Save position every 10s (throttled by wall clock, not audio clock)
+    const now = Date.now();
+    if (now - _abLastSaveTime > 10000) { _abLastSaveTime = now; _abSavePos(); }
   });
   _abAudio.addEventListener('loadedmetadata', () => {
-    document.getElementById('ab-dur').textContent = _abFmtTime(_abAudio.duration);
+    _abEls.dur.textContent = _abFmtTime(_abAudio.duration);
   });
-  _abAudio.addEventListener('play', () => {
-    document.getElementById('ab-play-btn').innerHTML = '&#x23F8;';
-  });
-  _abAudio.addEventListener('pause', () => {
-    document.getElementById('ab-play-btn').innerHTML = '&#x25B6;';
-    _abSavePos();
-  });
+  _abAudio.addEventListener('play', () => { _abEls.playBtn.innerHTML = '&#x23F8;'; });
+  _abAudio.addEventListener('pause', () => { _abEls.playBtn.innerHTML = '&#x25B6;'; _abSavePos(); });
+  _abAudio.addEventListener('waiting', () => { _abEls.playBtn.innerHTML = '&#x23F3;'; });
+  _abAudio.addEventListener('playing', () => { _abEls.playBtn.innerHTML = '&#x23F8;'; });
   _abAudio.addEventListener('ended', () => {
-    document.getElementById('ab-play-btn').innerHTML = '&#x25B6;';
-    // Clear saved position on completion
+    _abEls.playBtn.innerHTML = '&#x25B6;';
     try {
       const store = JSON.parse(localStorage.getItem('amux_audio_pos') || '{}');
       delete store[_abCurrentFile];
       localStorage.setItem('amux_audio_pos', JSON.stringify(store));
     } catch(e) {}
   });
-  // Save position before page unload
   window.addEventListener('beforeunload', _abSavePos);
 }
 
@@ -25710,9 +25726,18 @@ class CCHandler(BaseHTTPRequestHandler):
                 ".m4a": "audio/mp4", ".aac": "audio/aac", ".flac": "audio/flac",
             }
             mime = ALL_MIMES.get(ext, "application/octet-stream")
-            file_size = p.stat().st_size
+            stat = p.stat()
+            file_size = stat.st_size
+            # ETag based on mtime+size for caching
+            etag = f'"{int(stat.st_mtime)}-{file_size}"'
+            if_match = self.headers.get("If-None-Match", "")
+            if if_match == etag:
+                self.send_response(304)
+                self.end_headers()
+                return
             range_header = self.headers.get("Range", "")
             import re as _re
+            CHUNK = 65536  # 64KB chunks for streaming
             if range_header:
                 m = _re.match(r'bytes=(\d*)-(\d*)', range_header)
                 start = int(m.group(1)) if m and m.group(1) else 0
@@ -25724,19 +25749,32 @@ class CCHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
                 self.send_header("Content-Length", str(length))
                 self.send_header("Accept-Ranges", "bytes")
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "private, max-age=3600, immutable")
                 self.end_headers()
                 with open(p, "rb") as f:
                     f.seek(start)
-                    self.wfile.write(f.read(length))
+                    remaining = length
+                    while remaining > 0:
+                        chunk = f.read(min(CHUNK, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
             else:
                 self.send_response(200)
                 self.send_header("Content-Type", mime)
                 self.send_header("Content-Length", str(file_size))
                 self.send_header("Accept-Ranges", "bytes")
-                self.send_header("Cache-Control", "no-store")
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "private, max-age=3600, immutable")
                 self.end_headers()
-                self.wfile.write(p.read_bytes())
+                with open(p, "rb") as f:
+                    while True:
+                        chunk = f.read(CHUNK)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
             return
 
         # GET /api/autocomplete/dir?q=...
