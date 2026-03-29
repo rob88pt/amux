@@ -52,9 +52,9 @@ class ServerManager: ObservableObject {
 
     func removeServer(at offsets: IndexSet) {
         for i in offsets {
-            logger.info("Removed server: \(savedServers[i].name)")
+            logger.info("Removed server: \(self.savedServers[i].name)")
         }
-        savedServers.remove(atOffsets: offsets)
+        self.savedServers.remove(atOffsets: offsets)
     }
 
     func resetServer() {
