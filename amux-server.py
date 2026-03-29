@@ -6372,6 +6372,14 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     color: var(--dim); cursor: pointer; padding: 0 8px; font-size: 1.1rem; min-height: 36px;
     display: flex; align-items: center; flex-shrink: 0; }
   .peek-attach-btn:hover { color: var(--text); border-color: var(--accent); }
+  .peek-mic-btn { background: none; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--dim); cursor: pointer; padding: 0 8px; font-size: 1.1rem; min-height: 36px;
+    display: flex; align-items: center; flex-shrink: 0; transition: all 0.2s; }
+  .peek-mic-btn:hover { color: var(--text); border-color: var(--accent); }
+  .peek-mic-btn.active { color: #fff; background: var(--red); border-color: var(--red); animation: mic-pulse 1.5s ease-in-out infinite; }
+  @keyframes mic-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(248,81,73,0.4); } 50% { box-shadow: 0 0 0 8px rgba(248,81,73,0); } }
+  .voice-status { font-size: 0.72rem; color: var(--dim); padding: 2px 8px; display: none; align-items: center; gap: 6px; }
+  .voice-status.visible { display: flex; }
   /* Drag-over overlay */
   #peek-overlay.drag-over { outline: 2px dashed var(--accent); outline-offset: -3px; }
   #peek-overlay.drag-over .peek-drag-hint {
@@ -9237,6 +9245,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <div class="peek-cmd-bar">
       <button class="peek-cmd-toggle" id="peek-cmd-toggle" onclick="togglePeekCmd()">&#x25BC; Send command</button>
       <div class="peek-cmd-row open" id="peek-cmd-row" style="flex-wrap:wrap;">
+        <div class="voice-status" id="voice-status"><span id="voice-status-text"></span></div>
         <div class="chips" style="width:100%;margin:0;" id="peek-chips"></div>
         <!-- Attachment chips -->
         <div class="peek-attach-bar" id="peek-attach-bar"></div>
@@ -9252,6 +9261,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <input type="file" id="peek-file-input" multiple
           style="display:none" onchange="handlePeekFileInput(event)">
         <label for="peek-file-input" class="peek-attach-btn" title="Attach file">&#128206;</label>
+        <button class="peek-mic-btn" id="peek-mic-btn" onclick="_voiceToggle()" title="Voice chat">&#127908;</button>
         <button class="btn primary" onclick="sendPeekCmd()">Send</button>
       </div>
       <!-- Drag-over hint (shown by CSS when drag-over class is on peek-overlay) -->
@@ -13392,6 +13402,196 @@ async function generateTTS() {
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = '&#x1F50A; Generate'; }
   }
+}
+
+// ── Voice chat (Gemini Live API) ──
+let _voiceWs = null;
+let _voiceStream = null;
+let _voiceAudioCtx = null;
+let _voiceProcessor = null;
+let _voiceActive = false;
+let _voicePlayCtx = null;
+let _voicePlayQueue = [];
+let _voicePlaying = false;
+let _voiceModel = 'gemini-2.0-flash-live-001';
+
+function _voiceToggle() {
+  if (_voiceActive) _voiceStop(); else _voiceStart();
+}
+
+async function _voiceStart() {
+  const apiKey = window._GOOGLE_API_KEY;
+  if (!apiKey) { showToast('Set GOOGLE_API_KEY in ~/.amux/server.env'); return; }
+  const session = peekSession;
+  if (!session) { showToast('Open a session first'); return; }
+
+  // Request mic
+  try {
+    _voiceStream = await navigator.mediaDevices.getUserMedia({
+      audio: { sampleRate: { ideal: 16000 }, channelCount: 1, echoCancellation: true, noiseSuppression: true }
+    });
+  } catch(e) { showToast('Microphone access denied'); return; }
+
+  _voiceActive = true;
+  const btn = document.getElementById('peek-mic-btn');
+  if (btn) btn.classList.add('active');
+  _voiceSetStatus('Connecting...');
+
+  // Playback context at 24kHz (Gemini output rate)
+  _voicePlayCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+  _voicePlayQueue = [];
+  _voicePlaying = false;
+
+  // Connect to Gemini Live API
+  const wsUrl = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=' + encodeURIComponent(apiKey);
+  _voiceWs = new WebSocket(wsUrl);
+
+  _voiceWs.onopen = () => {
+    // Gather recent session output for context
+    const bodyEl = document.getElementById('peek-body');
+    const recentOutput = bodyEl ? bodyEl.textContent.slice(-2000) : '';
+
+    _voiceWs.send(JSON.stringify({
+      setup: {
+        model: 'models/' + _voiceModel,
+        generationConfig: {
+          responseModalities: ['AUDIO'],
+          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Puck' } } }
+        },
+        systemInstruction: { parts: [{ text:
+          'You are a voice assistant for amux, a terminal multiplexer. '
+          + 'The user is interacting with session "' + session + '". '
+          + 'You can send commands or messages to their terminal session using the send_to_session tool. '
+          + 'Keep responses concise and conversational. '
+          + 'Here is recent session output for context:\\n' + recentOutput.replace(/"/g, '\\"').slice(0, 1500)
+        }] },
+        tools: [{ functionDeclarations: [{
+          name: 'send_to_session',
+          description: 'Send a text message or command to the user\\'s active terminal session. Use this when the user asks you to run a command, type something, or send input to their session.',
+          parameters: { type: 'OBJECT', properties: {
+            message: { type: 'STRING', description: 'The text/command to send to the session' }
+          }, required: ['message'] }
+        }] }]
+      }
+    }));
+  };
+
+  _voiceWs.onmessage = (evt) => {
+    let msg;
+    try { msg = JSON.parse(evt.data); } catch(e) { return; }
+
+    if (msg.setupComplete) {
+      _voiceSetStatus('Listening...');
+      _voiceStartCapture();
+    }
+
+    // Audio from Gemini
+    if (msg.serverContent?.modelTurn?.parts) {
+      for (const part of msg.serverContent.modelTurn.parts) {
+        if (part.inlineData?.data) {
+          _voiceQueueAudio(part.inlineData.data);
+        }
+      }
+    }
+    if (msg.serverContent?.turnComplete) {
+      _voiceSetStatus('Listening...');
+    }
+
+    // Function calls
+    if (msg.toolCall?.functionCalls) {
+      for (const fc of msg.toolCall.functionCalls) {
+        if (fc.name === 'send_to_session') {
+          const message = fc.args?.message || '';
+          doSend(session, message);
+          showToast('Voice → ' + session + ': ' + (message.length > 40 ? message.slice(0, 40) + '...' : message));
+          _voiceWs.send(JSON.stringify({
+            toolResponse: { functionResponses: [{
+              id: fc.id, name: fc.name,
+              response: { result: { success: true, message: 'Sent to session' } }
+            }] }
+          }));
+        }
+      }
+    }
+  };
+
+  _voiceWs.onclose = () => { if (_voiceActive) _voiceStop(); };
+  _voiceWs.onerror = (e) => { showToast('Voice connection error'); _voiceStop(); };
+}
+
+function _voiceStartCapture() {
+  _voiceAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  const source = _voiceAudioCtx.createMediaStreamSource(_voiceStream);
+  // ScriptProcessor for broad compatibility (including iOS WebView)
+  _voiceProcessor = _voiceAudioCtx.createScriptProcessor(4096, 1, 1);
+  _voiceProcessor.onaudioprocess = (e) => {
+    if (!_voiceWs || _voiceWs.readyState !== WebSocket.OPEN) return;
+    const float32 = e.inputBuffer.getChannelData(0);
+    // float32 → int16 PCM
+    const int16 = new Int16Array(float32.length);
+    for (let i = 0; i < float32.length; i++) {
+      const s = Math.max(-1, Math.min(1, float32[i]));
+      int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    // int16 → base64
+    const bytes = new Uint8Array(int16.buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    const b64 = btoa(binary);
+    _voiceWs.send(JSON.stringify({
+      realtimeInput: { mediaChunks: [{ data: b64, mimeType: 'audio/pcm;rate=16000' }] }
+    }));
+  };
+  source.connect(_voiceProcessor);
+  _voiceProcessor.connect(_voiceAudioCtx.destination); // required for processing to work
+}
+
+function _voiceQueueAudio(b64Data) {
+  // Decode base64 → int16 PCM → float32
+  const raw = atob(b64Data);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  const int16 = new Int16Array(bytes.buffer);
+  const float32 = new Float32Array(int16.length);
+  for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768;
+  _voicePlayQueue.push(float32);
+  _voiceSetStatus('Speaking...');
+  if (!_voicePlaying) _voicePlayNext();
+}
+
+function _voicePlayNext() {
+  if (_voicePlayQueue.length === 0) { _voicePlaying = false; return; }
+  _voicePlaying = true;
+  const samples = _voicePlayQueue.shift();
+  const buf = _voicePlayCtx.createBuffer(1, samples.length, 24000);
+  buf.getChannelData(0).set(samples);
+  const src = _voicePlayCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(_voicePlayCtx.destination);
+  src.onended = _voicePlayNext;
+  src.start();
+}
+
+function _voiceStop() {
+  _voiceActive = false;
+  const btn = document.getElementById('peek-mic-btn');
+  if (btn) btn.classList.remove('active');
+  _voiceSetStatus('');
+  if (_voiceWs) { try { _voiceWs.close(); } catch(e) {} _voiceWs = null; }
+  if (_voiceProcessor) { try { _voiceProcessor.disconnect(); } catch(e) {} _voiceProcessor = null; }
+  if (_voiceAudioCtx) { try { _voiceAudioCtx.close(); } catch(e) {} _voiceAudioCtx = null; }
+  if (_voiceStream) { _voiceStream.getTracks().forEach(t => t.stop()); _voiceStream = null; }
+  if (_voicePlayCtx) { try { _voicePlayCtx.close(); } catch(e) {} _voicePlayCtx = null; }
+  _voicePlayQueue = [];
+  _voicePlaying = false;
+}
+
+function _voiceSetStatus(text) {
+  const el = document.getElementById('voice-status');
+  const span = document.getElementById('voice-status-text');
+  if (!el || !span) return;
+  if (text) { span.textContent = text; el.classList.add('visible'); }
+  else { el.classList.remove('visible'); }
 }
 
 function closeChipPicker() {
@@ -24723,7 +24923,8 @@ class CCHandler(BaseHTTPRequestHandler):
                 "</head>",
                 f'<script>window._AMUX_S3_ICAL_URL={_json.dumps(_S3_CAL_URL)};'
                 f'window._AMUX_AUTH_TOKEN={_json.dumps(AUTH_TOKEN)};'
-                f'window._AMUX_HOME={_json.dumps(str(Path.home()))};</script></head>',
+                f'window._AMUX_HOME={_json.dumps(str(Path.home()))};'
+                f'window._GOOGLE_API_KEY={_json.dumps(os.environ.get("GOOGLE_API_KEY",""))};</script></head>',
                 1,
             )
             return self._html(page)
