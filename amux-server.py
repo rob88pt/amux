@@ -13467,7 +13467,7 @@ async function _voiceStart() {
         }] },
         tools: [{ functionDeclarations: [{
           name: 'send_to_session',
-          description: 'Send a text message or command to the user\\'s active terminal session. Use this when the user asks you to run a command, type something, or send input to their session.',
+          description: "Send a text message or command to the user's active terminal session. Use this when the user asks you to run a command, type something, or send input to their session.",
           parameters: { type: 'OBJECT', properties: {
             message: { type: 'STRING', description: 'The text/command to send to the session' }
           }, required: ['message'] }
@@ -16088,37 +16088,28 @@ function statusStyle(id) {
   return palette[Math.max(0, idx) % palette.length];
 }
 
+// ── CRM state (hoisted before switchView so SSE + tab switch can reference) ──
+let _crmContacts = [];
+let _crmActiveId = null;
+let _crmDirty = false;
+let _crmSaveTimer = null;
+let _crmQueueOpen = false;
+let _crmOpenAbort = null;
+let _crmActiveTags = [];
+let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
+
 function switchView(view) {
   if (document.getElementById('grid-view').classList.contains('active')) exitGridMode();
   activeView = view;
-  document.getElementById('session-view').style.display = view === 'sessions' ? '' : 'none';
-  document.getElementById('board-view').style.display = view === 'board' ? '' : 'none';
-  document.getElementById('notifications-view').style.display = view === 'notifications' ? 'flex' : 'none';
-  document.getElementById('scheduler-view').style.display = view === 'scheduler' ? '' : 'none';
-  document.getElementById('files-view').style.display = view === 'files' ? 'flex' : 'none';
-  document.getElementById('logs-view').style.display = view === 'logs' ? 'flex' : 'none';
-  document.getElementById('notes-view').style.display = view === 'notes' ? 'flex' : 'none';
-  document.getElementById('crm-view').style.display = view === 'crm' ? 'flex' : 'none';
-  document.getElementById('map-view').style.display = view === 'map' ? 'flex' : 'none';
-  document.getElementById('metrics-view').style.display = view === 'metrics' ? 'flex' : 'none';
-  document.getElementById('torrents-view').style.display = view === 'torrents' ? 'flex' : 'none';
-  document.getElementById('terminal-view').style.display = view === 'terminal' ? 'flex' : 'none';
-  document.getElementById('graph-view').style.display = view === 'graph' ? 'flex' : 'none';
-  document.getElementById('journal-view').style.display = view === 'journal' ? 'flex' : 'none';
-  document.getElementById('tab-sessions').classList.toggle('active', view === 'sessions');
-  document.getElementById('tab-board').classList.toggle('active', view === 'board');
-  document.getElementById('tab-notifications').classList.toggle('active', view === 'notifications');
-  document.getElementById('tab-scheduler').classList.toggle('active', view === 'scheduler');
-  document.getElementById('tab-files').classList.toggle('active', view === 'files');
-  document.getElementById('tab-logs').classList.toggle('active', view === 'logs');
-  document.getElementById('tab-notes').classList.toggle('active', view === 'notes');
-  document.getElementById('tab-crm').classList.toggle('active', view === 'crm');
-  document.getElementById('tab-map').classList.toggle('active', view === 'map');
-  document.getElementById('tab-metrics').classList.toggle('active', view === 'metrics');
-  document.getElementById('tab-torrents').classList.toggle('active', view === 'torrents');
-  document.getElementById('tab-terminal').classList.toggle('active', view === 'terminal');
-  document.getElementById('tab-graph').classList.toggle('active', view === 'graph');
-  document.getElementById('tab-journal').classList.toggle('active', view === 'journal');
+  const _svIds = ['session','board','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','graph','journal'];
+  const _svNames = ['sessions','board','notifications','scheduler','files','logs','notes','crm','map','metrics','torrents','terminal','graph','journal'];
+  const _svDisplay = ['','','flex','','flex','flex','flex','flex','flex','flex','flex','flex','flex','flex'];
+  for (let i = 0; i < _svIds.length; i++) {
+    const ve = document.getElementById(_svIds[i] + '-view');
+    if (ve) ve.style.display = view === _svNames[i] ? (_svDisplay[i] || '') : 'none';
+    const te = document.getElementById('tab-' + _svNames[i]);
+    if (te) te.classList.toggle('active', view === _svNames[i]);
+  }
   if (view === 'torrents') _torrentLoad();
   if (view === 'terminal') _termInit();
   if (view === 'graph') _graphInit();
@@ -21778,23 +21769,21 @@ function _notesApplySidebarState() {
   }
 }
 
-// Register divider (horizontal rule) blot for Quill
-(function() {
-  const BlockEmbed = Quill.import('blots/block/embed');
-  class DividerBlot extends BlockEmbed {
-    static create() {
-      const node = super.create();
-      return node;
-    }
-    static value() { return true; }
-  }
-  DividerBlot.blotName = 'divider';
-  DividerBlot.tagName = 'hr';
-  Quill.register(DividerBlot);
-})();
-
+let _quillDividerRegistered = false;
 function _notesInitQuill() {
   if (_quill) return;
+  // Register divider (horizontal rule) blot for Quill (once)
+  if (!_quillDividerRegistered && typeof Quill !== 'undefined') {
+    const BlockEmbed = Quill.import('blots/block/embed');
+    class DividerBlot extends BlockEmbed {
+      static create() { return super.create(); }
+      static value() { return true; }
+    }
+    DividerBlot.blotName = 'divider';
+    DividerBlot.tagName = 'hr';
+    Quill.register(DividerBlot);
+    _quillDividerRegistered = true;
+  }
   _quill = new Quill('#notes-quill', {
     theme: 'snow',
     modules: {
@@ -22361,13 +22350,7 @@ async function _notesTogglePin(path) {
 }
 
 // ── CRM / People ──────────────────────────────────────────────────────────────
-let _crmContacts = [];
-let _crmActiveId = null;
-let _crmDirty = false;
-let _crmSaveTimer = null;
-let _crmQueueOpen = false;
-let _crmOpenAbort = null; // AbortController for in-flight contact fetches
-let _crmActiveTags = []; // tags for active contact (kept in-memory, no extra fetch)
+// (state vars hoisted before switchView — see above)
 
 function _crmHealthClass(d) {
   if (!d) return 'never';
@@ -22390,7 +22373,6 @@ function _crmFuInfo(fuDate) {
   return { text: (overdue ? '⚠ ' : '→ ') + fuDate, overdue };
 }
 
-let _crmSidebarOpen = localStorage.getItem('amux_crm_sidebar') !== 'closed';
 function _crmToggleSidebar() {
   _crmSidebarOpen = !_crmSidebarOpen;
   localStorage.setItem('amux_crm_sidebar', _crmSidebarOpen ? 'open' : 'closed');
