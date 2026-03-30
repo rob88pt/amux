@@ -26098,8 +26098,7 @@ class CCHandler(BaseHTTPRequestHandler):
             if not copy_safe:
                 cmd += ["-preset", "fast", "-crf", "23"]
             cmd += ["-loglevel", "error", "-y", "pipe:1"]
-            log.info("transcode %s: vcodec=%s acodec=%s → %s", p.name, vcodec, acodec,
-                     "remux" if copy_safe else "transcode")
+            print(f"[transcode] {p.name}: vcodec={vcodec} acodec={acodec} → {'remux' if copy_safe else 'transcode'}", flush=True)
             try:
                 proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE)
                 self.send_response(200)
@@ -26117,9 +26116,9 @@ class CCHandler(BaseHTTPRequestHandler):
                 self.wfile.write(b"0\r\n\r\n")
                 proc.wait()
                 if proc.returncode != 0:
-                    log.warning("ffmpeg transcode failed: %s", proc.stderr.read().decode(errors="replace")[:500])
+                    print(f"[transcode] ffmpeg failed: {proc.stderr.read().decode(errors='replace')[:500]}", flush=True)
             except Exception as e:
-                log.error("transcode error: %s", e)
+                print(f"[transcode] error: {e}", flush=True)
             return
 
         # GET /api/autocomplete/dir?q=...
