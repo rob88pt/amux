@@ -565,6 +565,78 @@ EOF
   esac
 }
 
+cmd_dispatch() {
+  # Register + start headless + wait for Claude ready + send prompt
+  # Usage: amux dispatch <name> [--model opus] [--yolo] [--dir /path] [flags] <prompt>
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: amux dispatch <name> [--model opus] [--yolo] [--dir /path] [flags] <prompt>"
+  shift
+
+  parse_claude_flags "$@"
+
+  local prompt="${CC_EXTRA_ARGS[*]:-}"
+  [[ -n "$prompt" ]] || die "dispatch requires a prompt — put it last after all flags"
+
+  ensure_dirs
+  need_tmux
+
+  # Register (overwrite any existing config)
+  local file="$CC_SESSIONS/$name.env"
+  cat > "$file" <<EOF
+# amux session: $name
+# registered: $(date -Iseconds)
+CC_NAME="$name"
+CC_DIR="${CC_DIR:-$(pwd)}"
+CC_FLAGS="${CC_FLAGS_STR}"
+EOF
+
+  local tname
+  tname=$(tmux_name "$name")
+
+  if is_running "$name"; then
+    echo "${YELLOW}already running:${RESET} $name — sending prompt directly"
+  else
+    load_defaults
+    load_session "$name"
+
+    local dir="${CC_DIR:-$HOME}"
+    dir="${dir/#\~/$HOME}"
+    [[ -d "$dir" ]] || die "directory not found: $dir"
+
+    local cmd="claude"
+    [[ -n "${CC_DEFAULT_FLAGS:-}" ]] && cmd="$cmd $CC_DEFAULT_FLAGS"
+    [[ -n "${CC_FLAGS:-}" ]] && cmd="$cmd $CC_FLAGS"
+
+    tmux new-session -d -s "$tname" -n "$name" -c "$dir" "cd $(printf '%q' "$dir"); $cmd"
+    tmux set-option -t "$tname" allow-rename off 2>/dev/null
+    tmux set-window-option -t "$tname" automatic-rename off 2>/dev/null
+    echo "${GREEN}started${RESET} ${BOLD}$name${RESET} in $dir"
+    echo "  ${DIM}$cmd${RESET}"
+
+    # Wait for Claude's idle prompt (❯ at end of line, or "✻ ... for Xs" completion)
+    echo -n "  waiting for Claude"
+    local elapsed=0 max_wait=30
+    while [[ $elapsed -lt $max_wait ]]; do
+      local out
+      out=$(tmux capture-pane -t "$tname" -p -S -8 2>/dev/null)
+      # Idle: ❯ prompt visible (Claude waiting for input)
+      if echo "$out" | grep -q '❯'; then
+        echo " ${GREEN}ready${RESET}"
+        break
+      fi
+      sleep 1
+      elapsed=$((elapsed + 1))
+      echo -n "."
+    done
+    [[ $elapsed -ge $max_wait ]] && echo " ${YELLOW}timed out, sending anyway${RESET}"
+    sleep 0.5  # small buffer after ready detection
+  fi
+
+  # Send the prompt
+  tmux send-keys -t "$tname" "$prompt" Enter
+  echo "${GREEN}dispatched${RESET} to ${BOLD}$name${RESET}: $prompt"
+}
+
 cmd_serve() {
   local port="${1:-8822}"
   # Resolve cc-server.py relative to the real location of this script
@@ -596,6 +668,7 @@ ${BOLD}Interaction:${RESET}
   amux peek <name> [lines]       View last N lines without attaching (default: 30)
   amux send <name> <text>        Send text + Enter to a session
   amux send <name> --keys 'C-c'  Send raw key sequence (e.g., Ctrl-C)
+  amux dispatch <name> [flags] <prompt>  Register + start + send prompt in one shot
 
 ${BOLD}Info:${RESET}
   amux ls                        List all sessions with status and previews
@@ -664,6 +737,7 @@ case "${1:-}" in
   defaults|config)  shift; cmd_defaults "$@" ;;
   start-all)        cmd_start_all ;;
   stop-all)         cmd_stop_all ;;
+  dispatch|d)       shift; cmd_dispatch "$@" ;;
   serve|web)        shift; cmd_serve "$@" ;;
   board|b)           shift; cmd_board "$@" ;;
   help|--help|-h)   cmd_help ;;
